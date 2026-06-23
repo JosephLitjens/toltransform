@@ -1,0 +1,7 @@
+numpy
+scipy
+pytransform3d
+networkx
+pydantic
+matplotlib
+pytest
