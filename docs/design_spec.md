@@ -112,6 +112,50 @@ This was chosen because local-frame (child-relative) perturbation is the most in
 - **"Chain"** is a GUI/organizational convenience only — an ordered path of edges from a root Frame to a leaf Frame for display purposes. The simulation engine operates on the graph directly and has no built-in concept of "chain."
 - The relative transform between **any two Frames** in the graph is computed by finding the unique path between them through their lowest common ancestor (using graph traversal — see Section 4, NetworkX) and composing/inverting edges along that path. This generalizes both "chain output tolerance" and "point-pair analysis between frames on different chains" into one operation.
 
+### 2.3.1 Disjoint Components: No Silent Auto-Connection (Locked Decision)
+
+**The engine never silently connects disjoint sub-graphs.** If a project contains two or more weakly-connected components (e.g., two chains that don't share any Frame at all), `nominal_transform_between()` and any point-pair query spanning the two components **must raise a clear, specific error rather than fabricating a connection.**
+
+**Rationale (this was explicitly considered and rejected as a "fix"):** An earlier review round proposed having the engine automatically designate a single global `world`/`base` Frame and silently attach every disjoint root to it via an invented zero-tolerance identity HTM, purely to guarantee that every relative-transform query succeeds. **This was rejected.** Auto-inserting a rigid, zero-tolerance connection the user never specified would make the tool's worst-case bounds silently optimistic in exactly the case where two sub-assemblies are *not* actually rigidly connected (e.g., two components on separate machine bases with real alignment uncertainty between them) — and the user might never notice, because the tool would simply stop raising the error that would otherwise have surfaced the missing information. For a tool whose entire purpose is producing trustworthy error budgets, an engine that refuses to answer an ill-posed question is strictly safer than one that guesses.
+
+**The correct modeling pattern — "Common Physical Base":** If two (or more) chains are physically referenced to a shared structure (a machine base, an optical table, a common mounting plate), the user must **explicitly model that structure as a Frame** and connect each chain's root to it via a real `HTMEdge` — using an identity nominal transform with zero tolerance if the connection is genuinely treated as rigid/ideal for this analysis, or a real nonzero tolerance if there is actual assembly/alignment uncertainty between the chain's root and the shared base. This requires no engine changes — it is the existing graph model used exactly as designed.
+
+Example:
+
+```
+# Two optical-component chains, each independently rooted, made queryable
+# against each other by explicitly tying both to a shared machine base.
+
+graph.add_frame("base")                  # the shared physical reference
+graph.add_frame("lens1_mount")
+graph.add_frame("lens1_seat")
+graph.add_frame("lens2_mount")
+graph.add_frame("lens2_seat")
+
+# Tie each chain's root to "base" with a real edge — identity + zero tolerance
+# if the base attachment is treated as ideal/rigid for this analysis, or a
+# nonzero tolerance if there is real assembly uncertainty at that joint.
+graph.add_edge("base", "lens1_mount", nominal=HTM.identity(), tolerance=zero_tolerance_spec())
+graph.add_edge("base", "lens2_mount", nominal=HTM.identity(), tolerance=zero_tolerance_spec())
+
+graph.add_edge("lens1_mount", "lens1_seat", nominal=..., tolerance=...)
+graph.add_edge("lens2_mount", "lens2_seat", nominal=..., tolerance=...)
+
+# Now "lens1_seat" and "lens2_seat" share a common ancestor ("base") and a
+# point-pair query between them succeeds, correctly propagating whatever
+# tolerance (zero or nonzero) was actually assigned to the base attachment edges.
+graph.nominal_transform_between("lens1_seat", "lens2_seat")  # succeeds
+```
+
+**Error message contract (implemented in `core/frame_graph.py`, Section 6.3):** when a point-pair query is attempted across two Frames with no path between them, the raised error must explicitly suggest this pattern rather than reporting a generic graph-traversal failure:
+
+```
+"Frames 'X' and 'Y' have no connected path between them. If these components
+share a common physical reference (e.g., a machine base or optical table),
+add an explicit joint Frame and define the structural edges connecting both
+sub-assembly roots to it."
+```
+
 ## 2.4 Monte Carlo Consistency Across Shared Edges (Critical)
 
 **Each HTM edge is sampled exactly once per Monte Carlo trial, not once per chain that uses it.** Because the frame graph is the canonical model (not independent per-chain copies), a shared upstream edge naturally produces the *same* sampled perturbation for every downstream Frame that depends on it, within a given trial. This is what allows correct relative-tolerance analysis between frames on different chains that share a common ancestor edge — it is a structural property of the graph-based design, not a special-cased rule that has to be separately implemented or maintained.
@@ -365,7 +409,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.3 `core/frame_graph.py`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+*(Last revised: 2026-06-23 — Claude, design-spec update per cross-review of disjoint-component handling)*
 
 **Responsibility:** Defines `Frame`, `HTMEdge`, and `FrameGraph` — the NetworkX-backed directed graph that is the canonical topological model of the entire system, including DAG validation, root identification, and relative-transform queries between arbitrary Frames.
 
@@ -390,14 +434,23 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 7. Implement `FrameGraph.root_frames() -> list[str]`: returns all Frames with in-degree zero — one root per weakly-connected component. Document explicitly: **a root Frame's pose is defined as identity for every Monte Carlo trial**, since it has no incoming edge and therefore no tolerance to sample (Section 6 top-level `TrialData` note).
 8. Implement `FrameGraph.weakly_connected_components() -> list[set[str]]` (thin wrapper over `networkx.weakly_connected_components`) — used to validate that point-pair queries (Step 10) involve Frames in the same component.
 9. Implement `FrameGraph.topological_edge_order() -> list[str]` (edge names in an order consistent with a topological sort of the underlying DAG) — this is the order the FK engine (Section 6.6) must process edges in to compose poses correctly (a child's pose depends on its parent's already being computed).
-10. Implement `FrameGraph.nominal_transform_between(frame_a, frame_b) -> HTM`: for Frames in the same component, compose nominal edges along the unique path from each Frame up to their lowest common ancestor (which, given the "max one incoming edge" rule, is just each Frame's unique path back to its shared root or nearer common ancestor), returning the transform from `frame_a` to `frame_b`. Raise a clear error if the two Frames are in different components (no relative transform is defined).
+10. Implement `FrameGraph.nominal_transform_between(frame_a, frame_b) -> HTM`: for Frames in the same component, compose nominal edges along the unique path from each Frame up to their lowest common ancestor (which, given the "max one incoming edge" rule, is just each Frame's unique path back to its shared root or nearer common ancestor), returning the transform from `frame_a` to `frame_b`.
+    - **Disjoint-component error contract (locked decision, Section 2.3.1):** if `frame_a` and `frame_b` are in different weakly-connected components, raise a dedicated exception (e.g., `DisjointFramesError`) carrying exactly the following message, with `frame_a`/`frame_b` substituted in:
+      ```
+      "Frames '{frame_a}' and '{frame_b}' have no connected path between them.
+      If these components share a common physical reference (e.g., a machine
+      base or optical table), add an explicit joint Frame and define the
+      structural edges connecting both sub-assembly roots to it."
+      ```
+    - This message must be raised at this layer (not left to bubble up as a raw NetworkX `NetworkXNoPath` exception) — wrap the underlying graph-traversal failure explicitly. **Do not auto-connect the components under any circumstance** (Section 2.3.1) — this error is the intended, correct behavior, not a defect to be silently engineered around.
 11. Implement `FrameGraph.all_edges() -> list[HTMEdge]` and `FrameGraph.all_frames() -> list[Frame]` (simple accessors, needed by the simulation engines to iterate).
 12. Write `tests/test_frame_graph.py`:
     - Cycle detection: build a graph with an intentional cycle, confirm `validate_dag()` raises and correctly reports the cycle path.
     - Multiple-incoming-edge detection: build a graph where one Frame has two parents, confirm `validate_dag()` raises and names the Frame.
     - Root identification: multi-component graph (two unrelated chains, no shared Frame) — confirm `root_frames()` returns both roots correctly.
     - Shared-frame (junction) case: two chains sharing a common upstream Frame — confirm `nominal_transform_between()` correctly composes through the shared ancestor for Frames on different downstream branches.
-    - Different-component case: confirm `nominal_transform_between()` raises a clear, specific error (not a generic NetworkX exception) when the two Frames have no path between them.
+    - Different-component case: confirm `nominal_transform_between()` raises `DisjointFramesError` with the exact locked message text (Section 2.3.1), naming both Frames — not a generic NetworkX exception.
+    - Common-physical-base pattern (Section 2.3.1): build two independently-rooted chains, explicitly connect both roots to a shared `"base"` Frame via real edges (one zero-tolerance, one with a nonzero tolerance), confirm `nominal_transform_between()` now succeeds between Frames on the two different chains and correctly propagates the base-attachment edges' tolerances into the result — this is the regression test proving the documented workaround in Section 2.3.1 actually works end-to-end, not just in the documentation's prose.
 
 **Interfaces:**
 
@@ -540,16 +593,18 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.7 `sim/allocation.py`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+*(Last revised: 2026-06-23 — Claude, design-spec update adding the iterative nonlinear damping loop per cross-review)*
 
 **Responsibility:** The inverse tolerance allocation engine (Mode 2, Section 3.2): computes sensitivity, solves the equal-allocation objective, and validates the proposed tolerance set via Monte Carlo.
 
 **Deliverables:**
 
 - Analytical (closed-form, adjoint-based) Jacobian/sensitivity computation — locked decision this session
-- `AllocationObjective` interface + `EqualAllocation` implementation
-- `AllocationEngine.solve(...)` and `.validate(...)`
-- `tests/test_allocation.py`, including a finite-difference cross-check of the analytical Jacobian (used only as a test oracle, never in production code)
+- `AllocationObjective` interface + `EqualAllocation` implementation, producing the **baseline linear allocation**
+- `AllocationEngine.allocate(...)` — the top-level entry point, wrapping the baseline linear solve in an **iterative nonlinear damping/correction loop** (locked decision, this revision — see Step 5 below)
+- `AllocationEngine.solve(...)` (baseline linear step) and `.validate(...)` (single MC validation pass), both retained as the internal building blocks `allocate()` composes
+- `AllocationResult` output structure explicitly preserving **both** the uncorrected linear baseline and the final nonlinearly-corrected allocation, plus convergence status
+- `tests/test_allocation.py`, including a finite-difference cross-check of the analytical Jacobian (used only as a test oracle, never in production code) and dedicated tests for the damping loop's convergence and non-convergence paths
 
 **Granular Task List:**
 
@@ -563,22 +618,41 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
    - Compute locked edges' fixed contribution to the budget (their existing `ToleranceSpec6` propagated through the same sensitivity machinery).
    - Call `objective.solve(...)` on the remaining free-edge budget.
    - Return the full proposed per-edge `ToleranceSpec6` set (locked edges unchanged, free edges populated per the objective's solution).
-5. Implement `AllocationEngine.validate(frame_graph, proposed_tolerances, frame_a, frame_b, n_trials, seed) -> ValidationReport`:
+5. **Iterative nonlinear damping/correction loop (locked decision, this revision):** Long serial chains with high-leverage joints exhibit meaningful geometric cross-coupling (`dx ≈ L·θ` — a small angular tolerance on an upstream joint sweeps a large positional arc by the time it reaches a distant downstream Frame). The closed-form linear allocation from Steps 1–4 does not account for this, and can produce an allocation that passes the linear sensitivity math but fails nonlinear Monte Carlo validation. `AllocationEngine.allocate()` is the top-level method that wraps `solve()` and `validate()` in a correction loop to address this:
+   a. Call `solve(...)` (Steps 1–4) to produce the **baseline linear allocation**. Retain this unmodified — it is never overwritten (Step 5e).
+   b. Call `validate(frame_graph, baseline_allocation, frame_a, frame_b, n_trials=1000, seed)` (Step 6) — a deliberately low-overhead `N_validate = 1000`-trial Monte Carlo pass, fast enough to run on every loop iteration without materially slowing down an interactive allocation workflow.
+   c. If the validated achieved envelope is within the target bound (per DoF) for every DoF, the baseline allocation is accepted as final with no correction — record `iterations_used = 0`, `converged = True`.
+   d. If validation fails (the achieved envelope exceeds the target on at least one DoF), apply a uniform damping factor `gamma` to the **free edges' angular DoF bounds only** (`rx, ry, rz` — translational DoF bounds are not damped by this loop, since the geometric-leverage failure mode this addresses is specifically angular-to-positional coupling): `new_bound = current_bound * gamma`, with `gamma` a tunable parameter, **default range `[0.7, 0.95]`** (locked this revision — document the exact default value chosen within that range once implemented, e.g., a fixed `gamma = 0.9` per iteration, or a configurable parameter exposed to the caller). Re-run `validate()` on the damped allocation and repeat.
+   e. **Termination:** cap the loop at `max_iter = 10` iterations (locked this revision). If the loop satisfies validation before reaching the cap, return with `converged = True` and the iteration count used. If the cap is reached without satisfying validation, **terminate gracefully (do not raise an exception that crashes the caller)** and return `converged = False` with the status message **exactly**: `"Allocation could not converge to target budget"`. The caller (eventually the GUI's run panel, Section 6.16) is responsible for surfacing this status to the user — the engine itself does not treat non-convergence as a fatal error, since a non-converging allocation is itself useful diagnostic information (it tells the engineer their target is infeasible given the current locked edges and chain geometry, not just that the tool failed).
+   f. **Output structure — `AllocationResult`:** the dataclass returned by `allocate()` must explicitly carry **both** allocations, never overwriting one with the other:
+      ```
+      AllocationResult
+      ├── baseline_linear_allocation: dict[str, ToleranceSpec6]   # uncorrected, from Step 5a
+      ├── corrected_allocation: dict[str, ToleranceSpec6]          # final, possibly == baseline if no correction was needed
+      ├── converged: bool
+      ├── iterations_used: int
+      ├── status_message: str | None   # set to the locked non-convergence string on failure, else None
+      └── final_validation_report: ValidationReport                # from the last validate() call in the loop
+      ```
+      The explicit preservation of both allocations is intentional and load-bearing: the *difference* between the baseline and corrected allocations is itself a direct, quantitative diagnostic of how much geometric-leverage coupling exists in the user's chain — a chain needing heavy damping (many iterations, large cumulative `gamma` reduction) is telling the engineer something real about their design's sensitivity to high-leverage joints, and that information would be lost if only the final corrected result were exposed.
+6. Implement `AllocationEngine.validate(frame_graph, proposed_tolerances, frame_a, frame_b, n_trials, seed) -> ValidationReport`:
    - Build a temporary `FrameGraph` (or mutate a copy) with the proposed tolerances applied to the free edges.
    - Run `MonteCarloFKEngine.run(...)` (Section 6.6) on it.
    - Compute the achieved relative-pose envelope between `frame_a` and `frame_b` from the resulting `TrialData` (via `postprocess/stats.py`, Section 6.8).
-   - Compare achieved vs. target per DoF; populate a `ValidationReport` with both values and the discrepancy (absolute and percentage).
-6. Write `tests/test_allocation.py`:
+   - Compare achieved vs. target per DoF; populate a `ValidationReport` with both values and the discrepancy (absolute and percentage), and a per-DoF pass/fail flag (consumed directly by Step 5's loop termination check).
+7. Write `tests/test_allocation.py`:
    - **Finite-difference cross-check:** for a representative chain, numerically perturb each free edge's DoF by a small known amount, re-run nominal composition (not the full MC engine — just deterministic composition), and confirm the resulting numerical sensitivity matches the analytical `compute_sensitivity()` output to within a documented numerical tolerance. This is the primary correctness gate on the Jacobian and must pass before the allocation engine is considered trustworthy.
-   - **Equal-allocation sanity check:** simple 2–3 edge chain, all free, confirm the solved tolerances are indeed equal (or equally scaled) across edges per the objective's definition.
+   - **Equal-allocation sanity check:** simple 2–3 edge chain, all free, confirm the solved baseline tolerances are indeed equal (or equally scaled) across edges per the objective's definition.
    - **Locked-edge case:** one edge locked to a known value, confirm the solver only adjusts the free edges and correctly accounts for the locked edge's fixed contribution.
    - **All-edges-locked edge case:** confirm the solver detects an infeasible/over-constrained situation (no free edges to solve for) and raises a clear, specific error rather than silently returning a meaningless result.
    - **MC validation discrepancy reporting:** confirm `validate()` correctly flags a case where the linear allocation under- or over-shoots the nonlinear MC-validated result (construct a case with deliberately large nominal rotation offsets between edges to induce a meaningful nonlinearity, since pure small-angle propagation through near-zero nominal offsets may not exercise this path).
+   - **Damping loop convergence test (new, locked decision):** using the same high-leverage geometry constructed for the discrepancy test above, confirm `allocate()` converges within `max_iter`, confirm `corrected_allocation`'s angular bounds are strictly tighter than `baseline_linear_allocation`'s, and confirm the final validation pass actually satisfies the target.
+   - **Damping loop non-convergence test (new, locked decision):** construct a deliberately infeasible target (e.g., an unreasonably tight target on a chain with most edges locked) and confirm `allocate()` returns `converged=False` with `status_message == "Allocation could not converge to target budget"` after exactly `max_iter` iterations, without raising an uncaught exception.
 
 **Interfaces:**
 
-- *Depends on:* `core/frame_graph.py` (`FrameGraph`, path/edge access), `core/tolerance.py` (`ToleranceSpec6`), `core/transforms.py` (`HTM`, adjoint computation), `sim/monte_carlo_fk.py` (`MonteCarloFKEngine`, for the validation pass), `postprocess/stats.py` (envelope computation for validation), `scipy.optimize` (reserved for future non-closed-form objectives — not required for v1's `EqualAllocation`).
-- *Used by:* eventually `gui/run_panel/` and `gui/results_viewer/` (Milestone B).
+- *Depends on:* `core/frame_graph.py` (`FrameGraph`, path/edge access), `core/tolerance.py` (`ToleranceSpec6`), `core/transforms.py` (`HTM`, adjoint computation), `sim/monte_carlo_fk.py` (`MonteCarloFKEngine`, for the validation pass — called once per damping-loop iteration, up to `max_iter` times), `postprocess/stats.py` (envelope computation for validation), `scipy.optimize` (reserved for future non-closed-form objectives — not required for v1's `EqualAllocation`).
+- *Used by:* eventually `gui/run_panel/` and `gui/results_viewer/` (Milestone B) — the GUI's "Run" action for IK mode calls `allocate()`, not `solve()` directly, so the damping correction is always applied by default.
 - *Public API (conceptual):*
   ```
   adjoint(T: HTM) -> np.ndarray (6,6)
@@ -587,6 +661,10 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
   EqualAllocation(AllocationObjective)
   AllocationEngine.solve(frame_graph, frame_a, frame_b, target_tolerance, objective) -> dict[str, ToleranceSpec6]
   AllocationEngine.validate(frame_graph, proposed_tolerances, frame_a, frame_b, n_trials, seed) -> ValidationReport
+  AllocationEngine.allocate(frame_graph, frame_a, frame_b, target_tolerance, objective=EqualAllocation(),
+                             n_validate=1000, gamma=0.9, max_iter=10, seed=...) -> AllocationResult
+  AllocationResult(baseline_linear_allocation, corrected_allocation, converged, iterations_used,
+                    status_message, final_validation_report)
   ```
 
 ---
@@ -605,7 +683,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Granular Task List:**
 
-1. Implement `pose_error_vector_batch(poses: np.ndarray, nominal: np.ndarray) -> np.ndarray` shape `(N,6)`: extract translation error directly (`poses[:, :3, 3] - nominal[:3, 3]`) and rotation error via the small-angle log map (`rotvec ≈` the skew-symmetric part of `R_error - I` extracted via the inverse of the Section 6.2 skew operation, or via `scipy.spatial.transform.Rotation`'s `as_rotvec()` on `R_nominal.T @ R_perturbed` — decide and document which, confirm both give equivalent results to small-angle order, then standardize on one for consistency with `core/tolerance.py`'s forward construction).
+1. Implement `pose_error_vector_batch(poses: np.ndarray, nominal: np.ndarray) -> np.ndarray` shape `(N,6)`: extract translation error directly (`poses[:, :3, 3] - nominal[:3, 3]`) and rotation error as the small-angle rotation vector **ω = θu** (axis `u` scaled by angle `θ` — the same notation locked for `postprocess/bounding_shapes.py`, Section 6.9 Step 4) via the small-angle log map (`ω ≈` the skew-symmetric part of `R_error - I` extracted via the inverse of the Section 6.2 skew operation, or via `scipy.spatial.transform.Rotation`'s `as_rotvec()` on `R_nominal.T @ R_perturbed` — decide and document which, confirm both give equivalent results to small-angle order, then standardize on one for consistency with `core/tolerance.py`'s forward construction). This function's columns `[3:6]` of the `(N,6)` output are exactly the `(N,3)` `rotvecs` array that `postprocess/bounding_shapes.py`'s `fit_rotation_cone()`/`fit_rotation_box()` require — no further conversion needed between the two modules.
 2. Implement `frame_envelope_box(trial_data, frame_name) -> dict`: per-DoF min/max of `pose_error_vector_batch` for the named frame — the axis-aligned worst-case box (Section 1.1, primary deliverable).
 3. Implement `frame_percentiles(trial_data, frame_name, percentiles: list[float]) -> dict`: per-DoF percentile table (e.g., 0.1/2.5/50/97.5/99.9), useful for the statistical (`"normal"`-distribution) comparison mode.
 4. Implement `frame_histogram_data(trial_data, frame_name, dof_index, bins=50) -> tuple[counts, bin_edges]`: thin wrapper over `np.histogram` for the named DoF, feeding `postprocess/reporting.py`.
@@ -638,7 +716,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.9 `postprocess/bounding_shapes.py`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+*(Last revised: 2026-06-23 — Claude, design-spec update hardening the rotation-vector type contract per cross-review)*
 
 **Responsibility:** Fits bounding shapes (box, ellipsoid/sphere for translation; cone or per-axis box for rotation) to the error-vector point clouds produced by `postprocess/stats.py`. This is the module responsible for the "bounding shape the engineer can use to make decisions" deliverable (Section 1.1, Section 3.1).
 
@@ -656,12 +734,14 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 3. **Rotation bounding shape — locked decision (2026-06-23): the cone is the lead representation.** Implement both of the following, but treat the cone as the primary reported value everywhere a single number/shape is needed (e.g., a results-viewer headline figure, a one-line summary in a report) — the box remains available as a secondary, more granular cross-check:
    - `fit_rotation_cone(rotvecs: np.ndarray) -> dict(max_angle, mean_axis)` — **primary.** Single worst-case tilt-angle-from-nominal magnitude, regardless of direction, plus the mean tilt axis for reference. This is the number an engineer reads first when asking "how far off-axis could this interface tip?"
    - `fit_rotation_box(rotvecs: np.ndarray) -> dict(min, max)` — **secondary.** Simple per-axis worst-case bounds (3 independent angle bounds), kept available for cases where the *direction* of angular error matters (e.g., pitch is much more sensitive than yaw for a given optical system) and a single isotropic cone magnitude would obscure that asymmetry.
-   - This task remains explicitly flagged for project-owner confirmation on which becomes the "default/leading" report in the GUI (Section 6.17) once Milestone B begins — implementing both now means no rework either way.
-4. Implement `fit_bounding_box(points: np.ndarray) -> dict(min, max)`: thin, explicit axis-aligned box fit (kept here for symmetry with the ellipsoid/cone fitters, even though `postprocess/stats.py`'s `frame_envelope_box` already effectively computes this for the 6-DoF case — this version operates on arbitrary 3D point clouds for reuse by both translation and rotation-box fits).
-5. Write `tests/test_bounding_shapes.py`:
+4. **Interface type-hardening (locked decision, this revision):** `fit_rotation_cone()` and `fit_rotation_box()` must be explicitly typed and documented to accept **only** pre-extracted small-angle rotation-vector arrays — `rotvecs: np.ndarray` of shape `(N,3)`, where each row is the axis-scaled-by-angle vector **ω = θu** (`u` the unit rotation axis, `θ` the small rotation angle; this is exactly what `postprocess/stats.py`'s `pose_error_vector_batch()`, Section 6.8 Step 1, already produces as the rotation half of its `(N,6)` output). Document this convention by name (`ω = θu`) in both functions' docstrings, not just by shape/dtype.
+   - These two functions must **never** accept a raw `(N,4,4)` HTM/pose array directly, and must not internally re-derive a rotation vector from one — doing so would risk reintroducing multi-axis coordinate-coupling artifacts (e.g., naively reading off individual matrix entries as if they were independent per-axis angles) that the dedicated small-angle log-map extraction in `postprocess/stats.py` is specifically designed to avoid. Enforce this with a type hint and a runtime shape check (`assert rotvecs.shape[1] == 3`, raising a clear error on a `(N,4,4)` array passed by mistake) rather than relying on the type hint alone.
+5. Implement `fit_bounding_box(points: np.ndarray) -> dict(min, max)`: thin, explicit axis-aligned box fit (kept here for symmetry with the ellipsoid/cone fitters, even though `postprocess/stats.py`'s `frame_envelope_box` already effectively computes this for the 6-DoF case — this version operates on arbitrary 3D point clouds for reuse by both translation and rotation-box fits).
+6. Write `tests/test_bounding_shapes.py`:
    - Synthetic point cloud with a known, constructed bounding sphere/ellipsoid (e.g., points placed exactly on a known ellipsoid surface) — confirm the fitted shape matches within numerical tolerance.
    - Confirm the `coverage<1.0` statistical ellipsoid is strictly smaller than the `coverage=1.0` worst-case ellipsoid for the same point cloud (sanity check on the chi-squared scaling).
    - Confirm `fit_rotation_box` and `fit_rotation_cone` agree on simple, symmetric synthetic cases (e.g., isotropic rotation-vector noise) where both representations should imply the same effective bound — this remains a useful cross-check even with the cone as the lead representation, since it catches a fitting bug in either function.
+   - **Type-hardening test (new, locked decision):** confirm passing a `(N,4,4)` array to `fit_rotation_cone()`/`fit_rotation_box()` raises a clear shape-mismatch error rather than silently proceeding with misinterpreted data.
 
 **Interfaces:**
 
@@ -669,11 +749,12 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - *Used by:* `postprocess/reporting.py` (renders the fitted shapes), eventually `gui/results_viewer/`.
 - *Public API (conceptual):*
   ```
-  fit_bounding_box(points) -> dict(min, max)
-  fit_bounding_sphere(points) -> dict(center, radius)
-  fit_bounding_ellipsoid(points, coverage=1.0) -> dict(center, axes_lengths, axes_directions)
-  fit_rotation_box(rotvecs) -> dict(min, max)
-  fit_rotation_cone(rotvecs) -> dict(max_angle, mean_axis)
+  fit_bounding_box(points: np.ndarray) -> dict(min, max)
+  fit_bounding_sphere(points: np.ndarray) -> dict(center, radius)
+  fit_bounding_ellipsoid(points: np.ndarray, coverage=1.0) -> dict(center, axes_lengths, axes_directions)
+  fit_rotation_box(rotvecs: np.ndarray)   -> dict(min, max)        # rotvecs shape (N,3), rows = ω = θu
+  fit_rotation_cone(rotvecs: np.ndarray)  -> dict(max_angle, mean_axis)  # rotvecs shape (N,3), rows = ω = θu
+  # fit_rotation_box / fit_rotation_cone never accept raw (N,4,4) pose/HTM arrays — locked decision
   ```
 
 ---
@@ -929,7 +1010,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 1. Write `examples/single_chain_fk_example.py`: define a simple 3–4 edge serial chain representative of a real mechanical stack-up, set tolerances on each edge (mixing `uniform` and `normal` for illustration), run `MonteCarloFKEngine`, print/plot the resulting envelope via `postprocess/reporting.py`'s `generate_frame_report()`.
 2. Write `examples/multi_chain_shared_frame_example.py`: define two chains sharing a common upstream Frame (the optical-mount scenario from Section 1.1/1.3), run the FK engine once, and explicitly demonstrate `postprocess/stats.py`'s `point_pair_envelope_box()` between Frames on the two different downstream branches — with inline commentary explaining why the relative tolerance is tighter than either branch's absolute tolerance (the shared-ancestor cancellation effect).
-3. Write `examples/allocation_example.py` (added once Milestone B's `sim/allocation.py` exists): define a chain with unset/free tolerances, specify a target end-effector envelope, run `AllocationEngine.solve()` and `.validate()`, print the proposed tolerances and the validation discrepancy report.
+3. Write `examples/allocation_example.py` (added once Milestone B's `sim/allocation.py` exists): define a chain with unset/free tolerances, specify a target end-effector envelope, run `AllocationEngine.allocate()`, print the resulting `AllocationResult` — including the baseline linear allocation, the corrected allocation, and convergence status — with inline commentary on what the gap between baseline and corrected reveals about the chain's geometric leverage.
 4. Each script should be runnable standalone (`python examples/single_chain_fk_example.py`) with no GUI dependency, and should print enough intermediate information (not just a final plot) that a reader can follow the logic without running it themselves.
 
 **Interfaces:**
@@ -1050,6 +1131,9 @@ These were explicit decisions made during project scoping and should be treated 
 | IK Jacobian/sensitivity method | Analytical/closed-form via small-angle adjoint transformation; finite-difference used only as a test-suite correctness oracle, never in production code — locked 2026-06-23 |
 | Monte Carlo RNG strategy | Per-edge keyed sub-streams (`SeedSequence` spawned from a deterministic hash of edge name), owned by `sim/monte_carlo_fk.py` — guarantees one edge's samples are unaffected by changes elsewhere in the graph — locked 2026-06-23 |
 | `core/sampling.py` location | Relocated from originally-planned `sim/sampling.py` to `core/sampling.py` to fix a backwards dependency (`core/tolerance.py` needs it) — locked 2026-06-23 |
+| Inverse allocation correction strategy | `AllocationEngine.allocate()` always applies an iterative nonlinear damping loop on top of the closed-form linear allocation: `N_validate=1000`, damping factor `gamma` default range `[0.7, 0.95]`, `max_iter=10`, damping applied to free *angular* DoF bounds only. Non-convergence returns `converged=False` with status message exactly `"Allocation could not converge to target budget"` (no exception raised) — locked 2026-06-23 |
+| Disjoint frame-graph components | The engine **never** auto-connects disjoint sub-graphs or fabricates a global origin frame. `nominal_transform_between()` raises `DisjointFramesError` with a locked, exact message recommending the user explicitly model a shared "Common Physical Base" Frame (Section 2.3.1) — locked 2026-06-23 |
+| Rotation-vector interface contract | `postprocess/bounding_shapes.py`'s `fit_rotation_cone()`/`fit_rotation_box()` accept only `(N,3)` rotation-vector arrays (convention named **ω = θu**); raw `(N,4,4)` pose arrays are explicitly rejected at runtime to prevent coordinate-coupling shortcuts — locked 2026-06-23 |
 
 ---
 
@@ -1084,4 +1168,5 @@ Because this tool produces engineering decisions about physical hardware toleran
 | 2026-06-23 | Claude (detailed planning session, at Project Owner's request) | Expanded every module subsection in Section 6 from a brief description into a full granular spec: explicit deliverables, ordered task lists, and inter-module interfaces (depends-on / used-by / public API). Locked four previously-open implementation decisions: (1) `TrialData` stores full 4x4 poses per Frame per trial; (2) Euler convention fixed as intrinsic ZYX; (3) IK Jacobian computed analytically via small-angle adjoint transformation, with finite-difference reserved for test-suite validation only; (4) Monte Carlo RNG uses per-edge keyed sub-streams owned by the FK engine. Corrected an architectural error: relocated `sampling.py` from `sim/` to `core/` to fix a backwards dependency. Updated the Section 5.1 directory tree, the Milestone A task table, and the Section 8 reference table accordingly. Rotation bounding-shape representation (per-axis box vs. cone) remains explicitly open — both will be implemented so the project owner can compare directly. |
 | 2026-06-23 | Project Owner | Confirmed `locked` semantics in `core/tolerance.py` (Section 6.2): a locked DoF is still sampled in FK mode (it has a real, fixed physical tolerance); `locked` only excludes it from the free-variable set in inverse allocation (Section 6.7). No change to the document, decision confirmed as already specified. |
 | 2026-06-23 | Project Owner | Resolved the previously-open rotation bounding-shape decision: **the cone (`max_angle` + `mean_axis`) is the confirmed lead representation** for angular error, with the per-axis box retained as a secondary/expandable cross-check rather than a co-equal display. Updated Section 6.9 (`postprocess/bounding_shapes.py`), Section 6.10 (`postprocess/reporting.py`), Section 6.17 (`gui/results_viewer/`), and the Section 8 reference table accordingly. |
+| 2026-06-23 | Project Owner (cross-checked by an independent reviewing agent; resolved by Claude) | Resolved three issues raised in an independent architectural review: (1) **`sim/allocation.py`** — added a top-level `AllocationEngine.allocate()` method wrapping the closed-form linear allocation in an iterative nonlinear damping/correction loop, addressing geometric cross-coupling (`dx ≈ L·θ`) in high-leverage serial chains: runs an `N_validate=1000`-trial MC check, applies a uniform damping factor (`gamma`, default range `[0.7, 0.95]`) to free edges' *angular* DoF bounds only when validation fails, capped at `max_iter=10`, returning a new `AllocationResult` that explicitly preserves **both** the uncorrected baseline linear allocation and the final corrected allocation (the gap between them is itself a diagnostic of chain leverage), with the exact non-convergence status message `"Allocation could not converge to target budget"` locked verbatim. (2) **`core/frame_graph.py` / Section 2.3** — explicitly rejected an auto-generated global-origin/silent-auto-connection proposal as unsafe for an error-budgeting tool (it would silently fabricate zero-tolerance rigid connections the user never specified); instead added new Section 2.3.1 documenting the "Common Physical Base" explicit-junction-Frame modeling pattern with a worked example, and locked the exact `DisjointFramesError` message text raised by `nominal_transform_between()` when two Frames share no path. (3) **`postprocess/bounding_shapes.py`** — hardened the `fit_rotation_cone()`/`fit_rotation_box()` interface to accept only pre-extracted `(N,3)` small-angle rotation-vector arrays (convention named explicitly: **ω = θu**), with a runtime shape check rejecting raw `(N,4,4)` pose arrays, preventing future shortcut implementations from reintroducing multi-axis coordinate-coupling artifacts. Updated Sections 2.3, 6.3, 6.7, 6.8, 6.9, and the corresponding test task lists accordingly. No code was written in this revision — design-specification update only, per explicit instruction. |
 
