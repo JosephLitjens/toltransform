@@ -182,12 +182,14 @@ toltransform/
 │   ├── tolerance.py        # ToleranceSpec (per-DoF), sampling, perturbation composition
 │   ├── frame_graph.py      # Frame, HTMEdge, FrameGraph (NetworkX-backed), DAG validation,
 │   │                       #   path-finding/relative-transform-between-any-two-frames
-│   └── conversions.py      # Thin wrappers around pytransform3d for xyz/euler/quat/screw <-> HTM
-├── sim/
-│   ├── monte_carlo_fk.py   # Forward verification engine: batched sampling + chain composition
-│   ├── allocation.py       # Inverse allocation engine: Jacobian/sensitivity + EqualAllocation
-│   │                       #   objective + MC validation pass
+│   ├── conversions.py      # Thin wrappers around pytransform3d for xyz/euler/quat/screw <-> HTM
 │   └── sampling.py         # Distribution sampling (uniform/normal via scipy.stats), sigma-level handling
+│   │                       #   [relocated from sim/ — see Section 6 architecture correction note]
+├── sim/
+│   ├── monte_carlo_fk.py   # Forward verification engine: batched sampling + chain composition;
+│   │                       #   owns TrialData and per-edge RNG sub-stream derivation
+│   └── allocation.py       # Inverse allocation engine: Jacobian/sensitivity + EqualAllocation
+│                           #   objective + MC validation pass
 ├── postprocess/
 │   ├── stats.py            # Per-Frame and per-point-pair envelope stats: box, percentiles, sigma
 │   ├── bounding_shapes.py  # Bounding box / ellipsoid / sphere (translation), bounding cone (rotation)
@@ -205,11 +207,17 @@ toltransform/
 │   └── point_pair_panel/
 ├── examples/                # Hand-verified example scripts/cases (see Section 9)
 └── tests/
+    ├── conftest.py
     ├── test_transforms.py
     ├── test_tolerance.py
     ├── test_frame_graph.py
     ├── test_monte_carlo_fk.py
-    └── test_allocation.py
+    ├── test_allocation.py
+    ├── test_stats.py
+    ├── test_bounding_shapes.py
+    ├── test_reporting.py
+    ├── test_schema.py
+    └── test_serializer.py
 ```
 
 ## 5.2 Key Class Sketch (Conceptual — Not Final Code)
@@ -221,7 +229,7 @@ This is a conceptual sketch to align understanding; actual implementation will b
 - **`Frame`** (`core/frame_graph.py`): just a name/id + optional metadata. No geometry.
 - **`HTMEdge`** (`core/frame_graph.py`): `parent_frame`, `child_frame`, `nominal: HTM`, `tolerance: ToleranceSpec6`.
 - **`FrameGraph`** (`core/frame_graph.py`): wraps a NetworkX `DiGraph`. Methods: `add_frame`, `add_edge`, `validate_dag()`, `path_between(frame_a, frame_b)`, `relative_transform_nominal(frame_a, frame_b)`.
-- **`MonteCarloFKEngine`** (`sim/monte_carlo_fk.py`): `run(frame_graph, n_trials, rng_seed) -> TrialData`, where `TrialData` stores, for every Frame, an `(n_trials, 4, 4)` array (or the reduced 6-vector pose-error representation) — vectorized, no per-trial Python loop.
+- **`MonteCarloFKEngine`** (`sim/monte_carlo_fk.py`): `run(frame_graph, n_trials, rng_seed) -> TrialData`, where `TrialData` stores, for every Frame, an `(n_trials, 4, 4)` array of absolute pose per trial (locked decision: full 4x4, not reduced 6-vector — see Section 6) — vectorized, no per-trial Python loop. This module also owns per-edge RNG sub-stream derivation (Section 6.6).
 - **`AllocationEngine`** (`sim/allocation.py`): `solve(frame_graph, target_frame_pair, target_tolerance, objective=EqualAllocation()) -> ProposedToleranceSet`, plus `validate(proposed_set, n_trials) -> ValidationReport`.
 - **`BoundingShapeFitter`** (`postprocess/bounding_shapes.py`): takes an `(n_trials, 3)` translation point cloud or `(n_trials, 3)` rotation-vector cloud, returns box/ellipsoid/cone parameters.
 
@@ -233,125 +241,733 @@ The GUI **never touches `core`/`sim` objects directly during editing** — it re
 
 # 6. Module Specifications
 
-This section gives every code module in the architecture (Section 5.1) its own dedicated subsection. **At this stage, each entry is intentionally brief** — a short description of the module's responsibility, consistent with the architecture already locked in Sections 2–5. As each module is actually designed and built, its subsection should be expanded in place with: detailed inputs/outputs, function/class signatures, algorithms, edge cases, and any module-specific decisions — so this section becomes the living, authoritative spec for the codebase itself, not just a directory listing.
+This section gives every code module in the architecture (Section 5.1) its own dedicated subsection, broken down into **granular, ordered task lists**, explicit **deliverables**, and explicit **interfaces** (what each module depends on, what depends on it, and its public API surface). This is the detailed planning layer of the project: the goal is that any module's subsection below should be specific enough that implementation work can begin directly from it, with no further design decisions required mid-build.
 
-**Convention for future expansion:** when a module's spec is fleshed out, add a dated, named note (consistent with Section 11 Changelog practice) at the top of its subsection indicating who last substantially revised it.
+**Convention for future expansion:** every module subsection carries a `*(Last revised: ...)*` line under its heading. When a module's spec is materially changed, update that line and log the change (with name) in Section 11 (Changelog).
+
+**Architecture correction made during this revision:** `sampling.py` was originally placed under `sim/`, but `core/tolerance.py` (a `core` module) depends on it for distribution sampling — that's a backwards dependency, since `sim/` is supposed to depend on `core/`, never the reverse. **`sampling.py` has been relocated to `core/sampling.py`.** The directory tree in Section 5.1 and all module numbering below reflect this correction. Module count and overall numbering (6.1–6.20) are unaffected — `core/` now owns 5 modules (6.1–6.5) and `sim/` owns 2 (6.6–6.7).
+
+**Shared data contract established this revision — `TrialData`:** Because this structure is consumed by nearly every downstream module, its definition is centralized here for reference (full ownership and construction detail is in Section 6.6):
+
+```
+TrialData
+├── n_trials: int
+├── seed: int                                  # master seed used for this run
+├── frame_poses: dict[str, np.ndarray]          # frame_name -> (N,4,4) absolute pose per trial
+├── nominal_poses: dict[str, np.ndarray]        # frame_name -> (4,4) unperturbed reference pose
+└── edge_seed_log: dict[str, int]               # edge_name -> derived sub-stream spawn key (traceability)
+```
+
+Per Section 2.4/2.5 and the decisions locked this session: pose data is stored as **full 4x4 matrices** (not reduced 6-vectors) for simplicity of composition; each weakly-connected component's root Frame (zero in-degree) is anchored at identity for every trial (it has no incoming edge, hence no tolerance, hence no perturbation); and `frame_poses[name][i]` is always the frame's pose in its own component's root frame for trial `i` — meaning the relative transform between *any* two frames in the *same component* can be computed directly from stored data via `inverse(T_a[i]) @ T_b[i]`, with no graph re-traversal needed at post-processing time.
+
+---
 
 ## 6.1 `core/transforms.py`
 
-**Responsibility:** Defines the canonical `HTM` class — the single representation of a homogeneous transformation matrix used everywhere else in the codebase. Provides constructors from every supported user-facing input format (xyz + Euler angles, raw 4x4 matrix, screw/exponential coordinates, quaternion + translation) and corresponding "to" converters, implemented as thin wrappers around `pytransform3d`. Provides `compose()` and `inverse()` operations. Retains metadata on the original input representation a user supplied, so the GUI can round-trip a user's preferred entry format without forcing premature canonicalization in the display layer.
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
 
-*(Detailed spec pending — to be expanded during Milestone A, Task A1.)*
+**Responsibility:** Defines the canonical `HTM` class — the single representation of a homogeneous transformation matrix used everywhere else in the codebase — plus its constructors, converters, and core operations.
+
+**Deliverables:**
+
+- `HTM` class wrapping a validated 4x4 `float64` NumPy array
+- Constructors: `from_xyz_euler`, `from_matrix`, `from_quaternion`, `from_screw`
+- Converters: `to_xyz_euler`, `to_quaternion`, `to_screw`
+- `compose()`, `inverse()` methods
+- Input-representation metadata, preserved and retrievable
+- Construction-time validation with actionable error messages
+- `tests/test_transforms.py` with hand-calculated and round-trip coverage
+
+**Granular Task List:**
+
+1. Lock and document the Euler convention as a module-level constant: **intrinsic ZYX** (locked this session). State this explicitly in the module docstring, not buried in a default parameter, since it is a foundational, hard-to-spot-if-wrong convention.
+2. Define an `InputRepresentation` data structure: `{kind: "xyz_euler" | "matrix" | "quaternion" | "screw", raw_params: dict}`.
+3. Implement `HTM.__init__(matrix, input_representation=None)`: validate shape is `(4,4)`, bottom row is `[0,0,0,1]` (within tolerance), and the rotation block is approximately orthonormal (e.g., `‖RᵗR - I‖ < 1e-6`); raise `ValueError` with a specific, actionable message on failure (state which check failed and the actual deviation).
+4. Implement `HTM.from_xyz_euler(xyz, euler_angles, convention="intrinsic_zyx")`, delegating the rotation construction to `core/conversions.py`.
+5. Implement `HTM.from_matrix(matrix)` — passthrough with the Step 3 validation, tagged `input_representation.kind = "matrix"`.
+6. Implement `HTM.from_quaternion(quat_wxyz, xyz)`, delegating to `core/conversions.py`.
+7. Implement `HTM.from_screw(axis, angle, translation_along_axis, point_on_axis=None)`, delegating to `core/conversions.py`; explicitly handle the zero-angle (pure translation) degenerate case rather than letting it propagate a divide-by-zero or NaN.
+8. Implement `to_xyz_euler(convention="intrinsic_zyx")`, `to_quaternion()`, `to_screw()` as round-trip converters that operate on `self.matrix` directly — independent of how the instance was originally constructed.
+9. Implement `compose(other: HTM) -> HTM` = matrix product; the result's `input_representation` is `None`/`"composed"` (composing two transforms has no single faithful "input representation").
+10. Implement `inverse() -> HTM` using the closed-form rigid-body inverse (`R.T`, `-R.T @ t`) rather than `np.linalg.inv`, for numerical robustness and speed.
+11. Implement `__repr__` (human-readable, shows translation + Euler angles for quick debugging) and a tolerance-aware `__eq__` (or a dedicated `is_close(other, atol)` method, since exact float equality on transforms is rarely meaningful).
+12. Write `tests/test_transforms.py`:
+    - Hand-calculated cases: pure translation; pure single-axis rotation; combined rotation + translation — each checked against a matrix computed manually (not just re-deriving the same code path).
+    - Round-trip tests: construct via each of the 4 constructors, convert back via the corresponding "to" method, confirm recovery within tolerance.
+    - Composition test: compose two known transforms, check against hand-multiplied result.
+    - Inverse test: confirm `T.compose(T.inverse())` is the identity within tolerance, for several non-trivial `T`.
+    - Edge case: near-gimbal-lock Euler angle input (e.g., 89.9° pitch in the locked convention) to confirm graceful, correct handling.
+
+**Interfaces:**
+
+- *Depends on:* `core/conversions.py` (all actual `pytransform3d` calls are routed through there — `transforms.py` itself never imports `pytransform3d` directly).
+- *Used by:* `core/tolerance.py` (perturbation composition), `core/frame_graph.py` (`HTMEdge.nominal`), `sim/monte_carlo_fk.py`, `sim/allocation.py`, `io/schema.py` (serialization round-trip), and eventually `gui/graph_editor/`.
+- *Public API (conceptual):*
+  ```
+  HTM.from_xyz_euler(xyz, euler_angles, convention="intrinsic_zyx") -> HTM
+  HTM.from_matrix(matrix) -> HTM
+  HTM.from_quaternion(quat_wxyz, xyz) -> HTM
+  HTM.from_screw(axis, angle, translation_along_axis, point_on_axis=None) -> HTM
+  HTM.matrix -> np.ndarray (4,4)
+  HTM.compose(other: HTM) -> HTM
+  HTM.inverse() -> HTM
+  HTM.to_xyz_euler(convention) / .to_quaternion() / .to_screw()
+  HTM.is_close(other, atol) -> bool
+  ```
+
+---
 
 ## 6.2 `core/tolerance.py`
 
-**Responsibility:** Defines `ToleranceSpec` (a single DoF's tolerance: distribution type, bound, sigma-level, locked flag) and `ToleranceSpec6` (the aggregate of all 6 DoF for one HTM edge). Implements sampling (via `scipy.stats`) for both `"uniform"` (hard bound) and `"normal"` (statistical, with sigma-level conversion) distributions. Implements the local-frame, right-multiplication small-angle perturbation composition described in Section 2.2.2 — i.e., turns a sampled 6-vector `delta` into a perturbation HTM and composes it with a nominal HTM.
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
 
-*(Detailed spec pending — to be expanded during Milestone A, Task A2.)*
+**Responsibility:** Defines the per-DoF and per-edge tolerance specifications, and implements the locked-convention small-angle perturbation model (Section 2.2.2): turning a sampled 6-vector into an applied perturbation on a nominal `HTM`.
+
+**Deliverables:**
+
+- `ToleranceSpec` (single DoF: distribution, bound, sigma-level, locked flag)
+- `ToleranceSpec6` (ordered aggregate of 6 `ToleranceSpec`, one per `[dx,dy,dz,rx,ry,rz]`)
+- `skew()`, `small_angle_rotation_matrix_batch()`, `delta_to_htm_batch()`, `apply_perturbation_batch()` — the full vectorized perturbation pipeline
+- `tests/test_tolerance.py` with hand-calculated perturbation checks
+
+**Granular Task List:**
+
+1. Implement `ToleranceSpec` as a validated dataclass: `distribution: Literal["uniform","normal"]`, `bound: float` (must be `>= 0`), `sigma_level: float = 3.0` (only meaningful when `distribution == "normal"`), `locked: bool = False`. Validate at construction; raise on negative bound or invalid distribution string.
+2. Implement `ToleranceSpec6` as an ordered container of exactly six `ToleranceSpec` instances, exposing both indexed access (`[0..5]`) and named properties (`.dx, .dy, .dz, .rx, .ry, .rz`) for readability in calling code.
+3. Implement `ToleranceSpec.sample(n_trials, rng) -> np.ndarray` shape `(n_trials,)`, delegating the actual distribution math to `core/sampling.py` (do not duplicate distribution logic here — keep it in one place, per Section 6.5).
+4. Implement `ToleranceSpec6.sample(n_trials, rng) -> np.ndarray` shape `(n_trials, 6)` by calling `.sample()` on each of the six specs and stacking as columns, in the fixed `[dx,dy,dz,rx,ry,rz]` order.
+5. **Explicit decision on `locked` and sampling:** `sample()` always samples every DoF regardless of `locked` — a locked tolerance still represents a real physical value that contributes to FK propagation. `locked` is consulted *only* by the allocation engine (Section 6.7) when selecting free variables; it has no effect inside `core/tolerance.py` itself. Document this explicitly in the module docstring to prevent future confusion.
+6. Implement `skew(v: np.ndarray) -> np.ndarray`: batched skew-symmetric matrix builder, input shape `(...,3)`, output shape `(...,3,3)`.
+7. Implement `small_angle_rotation_matrix_batch(rotvec_batch: np.ndarray) -> np.ndarray` shape `(N,3,3)`: build `R ≈ I + skew(rotvec)` per Section 2.2.2, then re-orthonormalize each matrix (e.g., one Newton/Schulz iteration or a single SVD-based projection) — document *why*: the first-order small-angle expansion is not exactly orthonormal, and downstream code (`HTM.inverse()`, `HTM.compose()`) assumes a valid rotation matrix.
+8. Implement `delta_to_htm_batch(delta_batch: np.ndarray) -> np.ndarray` shape `(N,4,4)`: assemble the batched perturbation HTM directly from the translation columns and the Step 7 rotation block.
+9. Implement `apply_perturbation_batch(nominal: HTM, delta_batch: np.ndarray) -> np.ndarray` shape `(N,4,4)`: per Section 2.2.2's locked local-frame right-multiply convention, `T_perturbed[i] = nominal.matrix @ delta_to_htm_batch(delta_batch)[i]`, implemented as a single vectorized batched matrix multiply (`np.einsum` or broadcasted `@`) — **no Python-level loop over `i`.**
+10. Write `tests/test_tolerance.py`:
+    - Zero-delta case: `apply_perturbation_batch` with an all-zero `delta_batch` returns the nominal matrix exactly (within floating-point tolerance) for every trial.
+    - Known small-angle case: a single nonzero `rx` perturbation produces a rotation matrix matching a manually computed `I + skew(rx,0,0)` to within the expected small-angle residual.
+    - Re-orthonormalization sanity check: confirm the orthonormalization step does not perceptibly distort a known sub-degree perturbation (error below a documented threshold, e.g., `1e-9`).
+    - `ToleranceSpec6.sample` shape/bounds check: for `"uniform"`, confirm all samples fall within `[-bound, +bound]`; for `"normal"`, confirm the empirical standard deviation over a large `n_trials` is close to `bound / sigma_level`.
+    - Confirm `locked=True` specs are still sampled (per Step 5's decision) — this is a regression test guarding against accidentally "fixing" the bug later in a way that silently breaks FK mode.
+
+**Interfaces:**
+
+- *Depends on:* `core/transforms.py` (`HTM`), `core/sampling.py` (distribution sampling primitives — relocated here this revision; see note at top of Section 6).
+- *Used by:* `core/frame_graph.py` indirectly (an `HTMEdge` carries a `ToleranceSpec6`), `sim/monte_carlo_fk.py` (calls `.sample()` and `apply_perturbation_batch()` per edge), `sim/allocation.py` (constructs candidate `ToleranceSpec6` instances during allocation), `io/schema.py` (serializes/deserializes `ToleranceSpec`/`ToleranceSpec6`).
+- *Public API (conceptual):*
+  ```
+  ToleranceSpec(distribution, bound, sigma_level=3.0, locked=False)
+  ToleranceSpec.sample(n_trials, rng) -> np.ndarray (n_trials,)
+  ToleranceSpec6(dx, dy, dz, rx, ry, rz)   # six ToleranceSpec instances
+  ToleranceSpec6.sample(n_trials, rng) -> np.ndarray (n_trials, 6)
+  apply_perturbation_batch(nominal: HTM, delta_batch: np.ndarray) -> np.ndarray (N,4,4)
+  ```
+
+---
 
 ## 6.3 `core/frame_graph.py`
 
-**Responsibility:** Defines `Frame` (a named coordinate frame identity with no inherent geometry), `HTMEdge` (a toleranced directed transform between two Frames), and `FrameGraph` (the NetworkX-backed directed graph wrapping them). Implements DAG validation (enforcing the "max one incoming edge per Frame" rule for FK mode, per Section 2.3) with clear, actionable error messages on violation. Implements path-finding and relative-transform computation between any two arbitrary Frames in the graph, via their lowest common ancestor — the single operation that underlies both chain-output analysis and cross-chain point-pair analysis.
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
 
-*(Detailed spec pending — to be expanded during Milestone A, Task A3.)*
+**Responsibility:** Defines `Frame`, `HTMEdge`, and `FrameGraph` — the NetworkX-backed directed graph that is the canonical topological model of the entire system, including DAG validation, root identification, and relative-transform queries between arbitrary Frames.
+
+**Deliverables:**
+
+- `Frame`, `HTMEdge` data structures
+- `FrameGraph` wrapping a NetworkX `DiGraph`, with build, validation, and query methods
+- Clear, actionable validation errors (cycles, multiple-incoming-edges, disconnected references)
+- `tests/test_frame_graph.py` covering validation and relative-transform queries, including multi-component (multi-chain) cases
+
+**Granular Task List:**
+
+1. Implement `Frame`: `name: str` (must be unique within a `FrameGraph`), optional `metadata: dict`.
+2. Implement `HTMEdge`: `parent: str`, `child: str`, `nominal: HTM`, `tolerance: ToleranceSpec6`, `name: str` (defaults to `f"{parent}->{child}"` if not explicitly given, but must be unique within the graph — required for the per-edge RNG sub-stream keying in Section 6.6).
+3. Implement `FrameGraph.__init__()` wrapping an empty `networkx.DiGraph`.
+4. Implement `FrameGraph.add_frame(name, metadata=None)` — raises if `name` already exists.
+5. Implement `FrameGraph.add_edge(parent, child, nominal, tolerance, name=None)` — raises if `parent`/`child` Frames don't exist, or if `name` collides with an existing edge.
+6. Implement `FrameGraph.validate_dag()`:
+   - Raise (with the specific cycle path printed) if the graph contains a cycle — use `networkx.find_cycle` to extract and report it, don't just say "graph is invalid."
+   - Raise (naming the offending Frame and listing all its incoming edges) if any Frame has more than one incoming edge — this is the explicit "strictly serial, open chains only" rule from Section 2.3/1.2.
+   - This method must be called (and must pass) before any simulation engine (Section 6.6) accepts the graph as input — engines should call it internally as a precondition, not rely on the caller remembering to.
+7. Implement `FrameGraph.root_frames() -> list[str]`: returns all Frames with in-degree zero — one root per weakly-connected component. Document explicitly: **a root Frame's pose is defined as identity for every Monte Carlo trial**, since it has no incoming edge and therefore no tolerance to sample (Section 6 top-level `TrialData` note).
+8. Implement `FrameGraph.weakly_connected_components() -> list[set[str]]` (thin wrapper over `networkx.weakly_connected_components`) — used to validate that point-pair queries (Step 10) involve Frames in the same component.
+9. Implement `FrameGraph.topological_edge_order() -> list[str]` (edge names in an order consistent with a topological sort of the underlying DAG) — this is the order the FK engine (Section 6.6) must process edges in to compose poses correctly (a child's pose depends on its parent's already being computed).
+10. Implement `FrameGraph.nominal_transform_between(frame_a, frame_b) -> HTM`: for Frames in the same component, compose nominal edges along the unique path from each Frame up to their lowest common ancestor (which, given the "max one incoming edge" rule, is just each Frame's unique path back to its shared root or nearer common ancestor), returning the transform from `frame_a` to `frame_b`. Raise a clear error if the two Frames are in different components (no relative transform is defined).
+11. Implement `FrameGraph.all_edges() -> list[HTMEdge]` and `FrameGraph.all_frames() -> list[Frame]` (simple accessors, needed by the simulation engines to iterate).
+12. Write `tests/test_frame_graph.py`:
+    - Cycle detection: build a graph with an intentional cycle, confirm `validate_dag()` raises and correctly reports the cycle path.
+    - Multiple-incoming-edge detection: build a graph where one Frame has two parents, confirm `validate_dag()` raises and names the Frame.
+    - Root identification: multi-component graph (two unrelated chains, no shared Frame) — confirm `root_frames()` returns both roots correctly.
+    - Shared-frame (junction) case: two chains sharing a common upstream Frame — confirm `nominal_transform_between()` correctly composes through the shared ancestor for Frames on different downstream branches.
+    - Different-component case: confirm `nominal_transform_between()` raises a clear, specific error (not a generic NetworkX exception) when the two Frames have no path between them.
+
+**Interfaces:**
+
+- *Depends on:* `core/transforms.py` (`HTM`), `core/tolerance.py` (`ToleranceSpec6`), `networkx`.
+- *Used by:* `sim/monte_carlo_fk.py` (consumes `topological_edge_order()`, `all_edges()`, `root_frames()`), `sim/allocation.py` (consumes `nominal_transform_between()` for sensitivity computation), `postprocess/stats.py` (consumes `weakly_connected_components()` to validate point-pair queries), `io/schema.py` (constructs a `FrameGraph` from a loaded `Project`), eventually `gui/graph_editor/`.
+- *Public API (conceptual):*
+  ```
+  FrameGraph.add_frame(name, metadata=None)
+  FrameGraph.add_edge(parent, child, nominal, tolerance, name=None)
+  FrameGraph.validate_dag() -> None  # raises on violation
+  FrameGraph.root_frames() -> list[str]
+  FrameGraph.weakly_connected_components() -> list[set[str]]
+  FrameGraph.topological_edge_order() -> list[str]
+  FrameGraph.nominal_transform_between(frame_a, frame_b) -> HTM
+  FrameGraph.all_edges() -> list[HTMEdge]
+  FrameGraph.all_frames() -> list[Frame]
+  ```
+
+---
 
 ## 6.4 `core/conversions.py`
 
-**Responsibility:** Thin, isolated wrapper layer around `pytransform3d` conversion functions (xyz/Euler, quaternion, screw/axis-angle, raw matrix, all to/from canonical HTM). Kept separate from `transforms.py`'s `HTM` class so the third-party dependency surface is contained in one file — if `pytransform3d` ever needs to be swapped out or patched around, this is the only file that should need to change.
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
 
-*(Detailed spec pending — to be expanded during Milestone A, Task A1.)*
+**Responsibility:** The sole, isolated point of contact with `pytransform3d`. Every conversion between a supported user-facing input format and a raw 4x4 matrix is implemented here; `core/transforms.py` calls into this module rather than importing `pytransform3d` itself.
 
-## 6.5 `sim/monte_carlo_fk.py`
+**Deliverables:**
 
-**Responsibility:** The forward tolerance verification engine (Mode 1, Section 3.1). Given a validated `FrameGraph`, a trial count `N`, and a random seed, vectorized-samples every edge's `ToleranceSpec6` exactly once per trial (Section 2.4), composes transforms along the graph to produce a sampled pose for every Frame in every trial, and returns a `TrialData` structure storing all per-trial, per-Frame pose data (as batched `(N,4,4)` arrays or reduced 6-vector pose-error arrays) for later post-processing. No Python-level loop over individual trials — fully vectorized NumPy operations.
+- One conversion function per supported format, both directions (to-matrix and from-matrix)
+- All functions operate on/return plain `np.ndarray`, never a `pytransform3d`-specific type, so the rest of the codebase has zero `pytransform3d` type exposure
+- `tests/test_transforms.py` round-trip coverage exercises this module indirectly (no separate test file needed, since this module has no behavior beyond what `HTM`'s round-trip tests already cover)
 
-*(Detailed spec pending — to be expanded during Milestone A, Task A4.)*
+**Granular Task List:**
 
-## 6.6 `sim/allocation.py`
+1. Implement `euler_to_rotation_matrix(euler_angles, convention="intrinsic_zyx") -> np.ndarray (3,3)`, wrapping the appropriate `pytransform3d.rotations` function for the locked convention.
+2. Implement `rotation_matrix_to_euler(R, convention="intrinsic_zyx") -> np.ndarray (3,)`, the inverse of Step 1.
+3. Implement `quaternion_to_rotation_matrix(quat_wxyz) -> np.ndarray (3,3)` and `rotation_matrix_to_quaternion(R) -> np.ndarray (4,)` (wxyz order — document explicitly, since `pytransform3d` and other libraries vary on wxyz vs. xyzw ordering, a classic source of silent bugs).
+4. Implement `screw_to_matrix(axis, angle, translation_along_axis, point_on_axis=None) -> np.ndarray (4,4)` and `matrix_to_screw(T) -> dict(axis, angle, translation_along_axis, point_on_axis)`, wrapping `pytransform3d`'s exponential-coordinate utilities; explicitly branch on the zero-angle degenerate case (pure translation has no well-defined rotation axis).
+5. Add a single module-level test or assertion confirming the installed `pytransform3d` version matches what's pinned in `requirements.txt` (cheap insurance against silent convention changes in a future library upgrade).
+6. Document, in the module docstring, the exact ordering convention for every format (quaternion wxyz, Euler intrinsic ZYX, screw axis normalization) — this is the single reference point for "which convention did we pick" so it never needs to be re-derived from code.
 
-**Responsibility:** The inverse tolerance allocation engine (Mode 2, Section 3.2). Computes the linear sensitivity (Jacobian) of a target relative pose (between any two Frames) with respect to each free, unlocked edge's 6-DoF perturbation. Implements the `AllocationObjective` interface and its sole v1 implementation, `EqualAllocation`, which solves for a uniform scale factor across free edges to meet a user-specified target envelope. Excludes `locked` edges/DoF from the free-variable vector. Runs a Monte Carlo validation pass on the proposed allocation (reusing `monte_carlo_fk.py`) and reports any discrepancy between the linear prediction and the nonlinear MC-validated result.
+**Interfaces:**
 
-*(Detailed spec pending — to be expanded during Milestone B, Task B2.)*
+- *Depends on:* `pytransform3d` (the only module in the entire codebase that imports it directly).
+- *Used by:* `core/transforms.py` exclusively.
+- *Public API (conceptual):*
+  ```
+  euler_to_rotation_matrix(euler_angles, convention) -> np.ndarray (3,3)
+  rotation_matrix_to_euler(R, convention) -> np.ndarray (3,)
+  quaternion_to_rotation_matrix(quat_wxyz) -> np.ndarray (3,3)
+  rotation_matrix_to_quaternion(R) -> np.ndarray (4,)
+  screw_to_matrix(axis, angle, translation_along_axis, point_on_axis=None) -> np.ndarray (4,4)
+  matrix_to_screw(T) -> dict
+  ```
 
-## 6.7 `sim/sampling.py`
+---
 
-**Responsibility:** Low-level distribution sampling utilities used by `core/tolerance.py` — wraps `scipy.stats` uniform and normal sampling, handles the sigma-level-to-standard-deviation conversion for `"normal"` distributions, and centralizes the random-number-generator/seed handling so all sampling in the engine is reproducible given a fixed seed (Section 2.5, Section 9).
+## 6.5 `core/sampling.py`
 
-*(Detailed spec pending — to be expanded during Milestone A, Task A2.)*
+*(Last revised: 2026-06-23 — Claude, detailed planning session — relocated from `sim/sampling.py` this revision; see architecture correction note at top of Section 6.)*
+
+**Responsibility:** Pure distribution-sampling math: given an already-constructed `np.random.Generator`, a bound, and (for normal) a sigma-level, draw samples. This module knows nothing about edges, Frames, or simulation runs — that bookkeeping lives in `sim/monte_carlo_fk.py` (Section 6.6). This module is intentionally "dumb" and reusable.
+
+**Deliverables:**
+
+- `sample_uniform(bound, n_trials, rng) -> np.ndarray`
+- `sample_normal(bound, sigma_level, n_trials, rng) -> np.ndarray`
+- A single dispatch function used by `ToleranceSpec.sample()`
+- `tests/test_tolerance.py` covers this indirectly (no dedicated test file needed — see Section 6.2 Step 10)
+
+**Granular Task List:**
+
+1. Implement `sample_uniform(bound, n_trials, rng) -> np.ndarray` shape `(n_trials,)`: draw from `Uniform(-bound, +bound)` via `rng.uniform(-bound, bound, size=n_trials)`.
+2. Implement `sample_normal(bound, sigma_level, n_trials, rng) -> np.ndarray` shape `(n_trials,)`: convert `bound`/`sigma_level` to a standard deviation (`sigma = bound / sigma_level`), draw via `rng.normal(0.0, sigma, size=n_trials)`.
+3. Implement `sample(distribution, bound, sigma_level, n_trials, rng) -> np.ndarray`: a single dispatch function (`if distribution == "uniform": ... elif "normal": ...`) — this is the function `ToleranceSpec.sample()` actually calls, keeping `core/tolerance.py` free of any distribution-specific branching.
+4. Edge case: `bound == 0` should deterministically return an all-zero array (not error, not draw degenerate noise) for both distributions — this is the valid representation of "no tolerance on this DoF."
+
+**Interfaces:**
+
+- *Depends on:* `numpy` only.
+- *Used by:* `core/tolerance.py` (`ToleranceSpec.sample()`).
+- *Public API (conceptual):*
+  ```
+  sample_uniform(bound, n_trials, rng) -> np.ndarray (n_trials,)
+  sample_normal(bound, sigma_level, n_trials, rng) -> np.ndarray (n_trials,)
+  sample(distribution, bound, sigma_level, n_trials, rng) -> np.ndarray (n_trials,)
+  ```
+
+---
+
+## 6.6 `sim/monte_carlo_fk.py`
+
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+
+**Responsibility:** The forward tolerance verification engine (Mode 1, Section 3.1) and the owner of the `TrialData` structure (defined at the top of Section 6). Also owns per-edge RNG sub-stream derivation, per this session's locked decision.
+
+**Deliverables:**
+
+- `TrialData` dataclass (defined at top of Section 6)
+- `make_edge_rng(master_seed, edge_name) -> np.random.Generator` — deterministic, edge-keyed sub-stream derivation
+- `MonteCarloFKEngine.run(frame_graph, n_trials, seed) -> TrialData`
+- Fully vectorized chain composition (no Python-level loop over individual trials)
+- `tests/test_monte_carlo_fk.py`, including the dedicated shared-edge consistency regression test required by Section 9, Item 3
+
+**Granular Task List:**
+
+1. Implement `make_edge_rng(master_seed: int, edge_name: str) -> np.random.Generator`: derive a deterministic spawn key from `edge_name` (e.g., a stable string hash, such as the first 8 bytes of `hashlib.sha256(edge_name.encode()).digest()` interpreted as an integer), and construct `np.random.default_rng(np.random.SeedSequence([master_seed, spawn_key]))`. Document the exact hashing scheme in the module docstring — this is the kind of detail that must never silently change, since changing it would break reproducibility of every previously-recorded result.
+   - **Why this matters (document in code):** this guarantees that adding, removing, or modifying *other* edges in the graph never changes the random draws for *this* edge, for a fixed `master_seed` and `n_trials` — a property that would not hold under a single shared global RNG stream consumed in topological order.
+2. Define the `TrialData` dataclass exactly per the Section 6 top-level contract (`n_trials`, `seed`, `frame_poses`, `nominal_poses`, `edge_seed_log`).
+3. Implement `MonteCarloFKEngine.run(frame_graph: FrameGraph, n_trials: int, seed: int) -> TrialData`:
+   a. Call `frame_graph.validate_dag()` as a precondition (do not trust the caller to have already done this).
+   b. Compute `root_frames = frame_graph.root_frames()`; initialize `frame_poses[root] = np.tile(np.eye(4), (n_trials,1,1))` and `nominal_poses[root] = np.eye(4)` for each root.
+   c. Iterate edges in `frame_graph.topological_edge_order()`. For each edge:
+      - Derive `rng = make_edge_rng(seed, edge.name)`; record `edge_seed_log[edge.name]`.
+      - Sample `delta_batch = edge.tolerance.sample(n_trials, rng)` (shape `(N,6)`).
+      - Compute `perturbed_batch = apply_perturbation_batch(edge.nominal, delta_batch)` (shape `(N,4,4)`) — from `core/tolerance.py`.
+      - Compose: `frame_poses[edge.child] = frame_poses[edge.parent] @ perturbed_batch` (batched matrix multiply, vectorized over the leading `N` axis — verify this is implemented as one vectorized operation, not a Python loop over `range(n_trials)`).
+      - Compute `nominal_poses[edge.child] = nominal_poses[edge.parent].matrix @ edge.nominal.matrix` (single 4x4, unperturbed reference).
+   d. Return the populated `TrialData`.
+4. Performance check: confirm step 3c's batched composition is implemented via `np.einsum('nij,njk->nik', ...)` or equivalent broadcasted `@` — add a one-line comment/assertion in code (or a test) confirming no per-trial Python loop exists, since this is explicitly called out as a non-negotiable performance requirement (Section 5.1/2.5).
+5. Write `tests/test_monte_carlo_fk.py`:
+   - **2-edge chain hand-check:** build a simple 2-edge chain with known, simple tolerances; run with a small `n_trials`; manually verify a handful of individual trial outputs by hand-computing the expected perturbed compositions for the same sampled deltas (requires either fixing the seed and manually replicating the RNG draw, or temporarily monkey-patching the sampler to return known fixed deltas for the test — prefer the latter, it's more robust to incidental RNG implementation changes).
+   - **3-edge chain hand-check:** same approach, one more edge, to confirm composition order/chaining is correct beyond the trivial 2-edge case.
+   - **Shared-edge consistency test (Section 9, Item 3 — required):** build a graph with one shared upstream edge feeding two downstream branches; run the engine once; confirm that the *same* per-trial sampled perturbation was applied to the shared edge regardless of which downstream Frame's pose you inspect (this can be checked indirectly: compute the relative transform from the shared edge's parent to its child via both downstream paths' stored data and confirm they match the directly-stored `frame_poses` for the shared edge's child frame exactly, for every trial).
+   - **Reproducibility test:** run twice with the same `seed`, confirm bit-for-bit identical `TrialData`. Run twice with the same `seed` but one extra unrelated edge added elsewhere in the graph, confirm the pre-existing edges' samples are unchanged (this is the direct test of Step 1's "why this matters" claim).
+   - **Root-anchor test:** confirm a root Frame's `frame_poses` entry is exactly identity for every trial.
+
+**Interfaces:**
+
+- *Depends on:* `core/frame_graph.py` (`FrameGraph`, `HTMEdge`), `core/tolerance.py` (`apply_perturbation_batch`), `core/transforms.py` (`HTM`), `numpy`.
+- *Used by:* `postprocess/stats.py` and `postprocess/bounding_shapes.py` (consume `TrialData`), `sim/allocation.py` (uses this engine internally for its MC validation pass), eventually `gui/run_panel/`.
+- *Public API (conceptual):*
+  ```
+  TrialData(n_trials, seed, frame_poses, nominal_poses, edge_seed_log)
+  make_edge_rng(master_seed: int, edge_name: str) -> np.random.Generator
+  MonteCarloFKEngine.run(frame_graph: FrameGraph, n_trials: int, seed: int) -> TrialData
+  ```
+
+---
+
+## 6.7 `sim/allocation.py`
+
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+
+**Responsibility:** The inverse tolerance allocation engine (Mode 2, Section 3.2): computes sensitivity, solves the equal-allocation objective, and validates the proposed tolerance set via Monte Carlo.
+
+**Deliverables:**
+
+- Analytical (closed-form, adjoint-based) Jacobian/sensitivity computation — locked decision this session
+- `AllocationObjective` interface + `EqualAllocation` implementation
+- `AllocationEngine.solve(...)` and `.validate(...)`
+- `tests/test_allocation.py`, including a finite-difference cross-check of the analytical Jacobian (used only as a test oracle, never in production code)
+
+**Granular Task List:**
+
+1. **Sensitivity derivation (analytical/closed-form — locked decision):** For a path of edges from `frame_a` to `frame_b`, derive the sensitivity of the relative-pose 6-vector error at `frame_b` (relative to `frame_a`) with respect to a small local perturbation `delta_k` on free edge `k` along that path. Under the small-angle approximation, this is the standard adjoint-transformed unit-twist construction used in manipulator Jacobians: a perturbation on edge `k` propagates to `frame_b` via the adjoint transformation of the nominal transform from edge `k`'s child frame to `frame_b`. Implement this as `compute_sensitivity(frame_graph, frame_a, frame_b, free_edge_names) -> np.ndarray` shape `(6, 6*len(free_edge_names))` (one 6x6 block per free edge).
+   - Sub-task: implement the 6x6 `adjoint(T: HTM) -> np.ndarray` helper (block matrix `[[R, 0],[skew(t)@R, R]]` or the standard equivalent — confirm exact convention against the local-frame right-multiply perturbation convention from Section 2.2.2 before finalizing, since adjoint convention must match the perturbation convention exactly or the sensitivity will be silently wrong).
+2. Implement the `AllocationObjective` abstract interface: a `solve(sensitivity_matrix, target_bound_vector, free_edge_names) -> dict[edge_name, ToleranceSpec6]` method signature, to allow future objectives beyond v1's `EqualAllocation` without changing the calling code in `AllocationEngine`.
+3. Implement `EqualAllocation(AllocationObjective)`: solves for a single uniform scale factor `s` applied to all free edges' (currently-unset or placeholder) per-DoF bounds such that the linear worst-case sum of contributions (via the sensitivity matrix from Step 1) equals the target bound, per DoF. This reduces to a simple linear equation per target DoF (closed-form, no iterative optimizer needed for v1) — document the exact formula once derived, including how multiple target DoF constraints are reconciled into a single scale factor (e.g., take the most restrictive/binding DoF, or solve a small least-squares system — **decide and document explicitly once this task is reached; flag as an open implementation decision for the Milestone B session that builds this module**).
+4. Implement `AllocationEngine.solve(frame_graph, frame_a, frame_b, target_tolerance: ToleranceSpec6, objective=EqualAllocation()) -> dict[edge_name, ToleranceSpec6]`:
+   - Identify all edges on the path between `frame_a` and `frame_b` (via `frame_graph.nominal_transform_between`'s underlying path logic — may require adding a `path_edges_between()` accessor to `FrameGraph`, Section 6.3, if not already present from that module's build).
+   - Partition into free (unlocked) and locked edges.
+   - Compute locked edges' fixed contribution to the budget (their existing `ToleranceSpec6` propagated through the same sensitivity machinery).
+   - Call `objective.solve(...)` on the remaining free-edge budget.
+   - Return the full proposed per-edge `ToleranceSpec6` set (locked edges unchanged, free edges populated per the objective's solution).
+5. Implement `AllocationEngine.validate(frame_graph, proposed_tolerances, frame_a, frame_b, n_trials, seed) -> ValidationReport`:
+   - Build a temporary `FrameGraph` (or mutate a copy) with the proposed tolerances applied to the free edges.
+   - Run `MonteCarloFKEngine.run(...)` (Section 6.6) on it.
+   - Compute the achieved relative-pose envelope between `frame_a` and `frame_b` from the resulting `TrialData` (via `postprocess/stats.py`, Section 6.8).
+   - Compare achieved vs. target per DoF; populate a `ValidationReport` with both values and the discrepancy (absolute and percentage).
+6. Write `tests/test_allocation.py`:
+   - **Finite-difference cross-check:** for a representative chain, numerically perturb each free edge's DoF by a small known amount, re-run nominal composition (not the full MC engine — just deterministic composition), and confirm the resulting numerical sensitivity matches the analytical `compute_sensitivity()` output to within a documented numerical tolerance. This is the primary correctness gate on the Jacobian and must pass before the allocation engine is considered trustworthy.
+   - **Equal-allocation sanity check:** simple 2–3 edge chain, all free, confirm the solved tolerances are indeed equal (or equally scaled) across edges per the objective's definition.
+   - **Locked-edge case:** one edge locked to a known value, confirm the solver only adjusts the free edges and correctly accounts for the locked edge's fixed contribution.
+   - **All-edges-locked edge case:** confirm the solver detects an infeasible/over-constrained situation (no free edges to solve for) and raises a clear, specific error rather than silently returning a meaningless result.
+   - **MC validation discrepancy reporting:** confirm `validate()` correctly flags a case where the linear allocation under- or over-shoots the nonlinear MC-validated result (construct a case with deliberately large nominal rotation offsets between edges to induce a meaningful nonlinearity, since pure small-angle propagation through near-zero nominal offsets may not exercise this path).
+
+**Interfaces:**
+
+- *Depends on:* `core/frame_graph.py` (`FrameGraph`, path/edge access), `core/tolerance.py` (`ToleranceSpec6`), `core/transforms.py` (`HTM`, adjoint computation), `sim/monte_carlo_fk.py` (`MonteCarloFKEngine`, for the validation pass), `postprocess/stats.py` (envelope computation for validation), `scipy.optimize` (reserved for future non-closed-form objectives — not required for v1's `EqualAllocation`).
+- *Used by:* eventually `gui/run_panel/` and `gui/results_viewer/` (Milestone B).
+- *Public API (conceptual):*
+  ```
+  adjoint(T: HTM) -> np.ndarray (6,6)
+  compute_sensitivity(frame_graph, frame_a, frame_b, free_edge_names) -> np.ndarray
+  AllocationObjective.solve(sensitivity_matrix, target_bound_vector, free_edge_names) -> dict
+  EqualAllocation(AllocationObjective)
+  AllocationEngine.solve(frame_graph, frame_a, frame_b, target_tolerance, objective) -> dict[str, ToleranceSpec6]
+  AllocationEngine.validate(frame_graph, proposed_tolerances, frame_a, frame_b, n_trials, seed) -> ValidationReport
+  ```
+
+---
 
 ## 6.8 `postprocess/stats.py`
 
-**Responsibility:** Computes envelope statistics (min/max axis-aligned box, percentile tables, basic per-DoF histogram-ready binned data) for any Frame's stored trial data, and for the relative pose between any two Frames (Section 3.3), directly from the `TrialData` produced by the Monte Carlo engine — no re-simulation required.
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
 
-*(Detailed spec pending — to be expanded during Milestone A, Task A5.)*
+**Responsibility:** Computes envelope statistics for any single Frame, and for the relative pose between any two Frames in the same component, directly from a `TrialData` instance — no re-simulation, no graph traversal beyond a same-component validation check.
+
+**Deliverables:**
+
+- Per-Frame envelope/percentile/histogram-data functions
+- Point-pair relative-pose statistics, exploiting the "absolute pose already stored" property (Section 6 top-level note)
+- `tests/test_stats.py` (new test file — not listed in the original Section 5.1 tree; add it)
+
+**Granular Task List:**
+
+1. Implement `pose_error_vector_batch(poses: np.ndarray, nominal: np.ndarray) -> np.ndarray` shape `(N,6)`: extract translation error directly (`poses[:, :3, 3] - nominal[:3, 3]`) and rotation error via the small-angle log map (`rotvec ≈` the skew-symmetric part of `R_error - I` extracted via the inverse of the Section 6.2 skew operation, or via `scipy.spatial.transform.Rotation`'s `as_rotvec()` on `R_nominal.T @ R_perturbed` — decide and document which, confirm both give equivalent results to small-angle order, then standardize on one for consistency with `core/tolerance.py`'s forward construction).
+2. Implement `frame_envelope_box(trial_data, frame_name) -> dict`: per-DoF min/max of `pose_error_vector_batch` for the named frame — the axis-aligned worst-case box (Section 1.1, primary deliverable).
+3. Implement `frame_percentiles(trial_data, frame_name, percentiles: list[float]) -> dict`: per-DoF percentile table (e.g., 0.1/2.5/50/97.5/99.9), useful for the statistical (`"normal"`-distribution) comparison mode.
+4. Implement `frame_histogram_data(trial_data, frame_name, dof_index, bins=50) -> tuple[counts, bin_edges]`: thin wrapper over `np.histogram` for the named DoF, feeding `postprocess/reporting.py`.
+5. Implement `relative_pose_trials(trial_data, frame_graph, frame_a, frame_b) -> np.ndarray` shape `(N,4,4)`:
+   - Validate `frame_a` and `frame_b` are in the same weakly-connected component (via `frame_graph.weakly_connected_components()`) — raise a clear, specific error if not (this is the one place `postprocess/stats.py` needs `FrameGraph` at all, purely for this validation).
+   - Compute `inverse(trial_data.frame_poses[frame_a][i]) @ trial_data.frame_poses[frame_b][i]` for every trial `i`, vectorized (batched inverse + batched matmul, no Python loop).
+6. Implement `relative_pose_nominal(trial_data, frame_a, frame_b) -> np.ndarray` shape `(4,4)`: same as Step 5 but using `trial_data.nominal_poses`, for use as the reference point in error-vector extraction.
+7. Implement `point_pair_envelope_box(trial_data, frame_graph, frame_a, frame_b) -> dict`: combines Steps 1, 5, and 6 to produce the same kind of per-DoF min/max box as Step 2, but for the *relative* pose between two arbitrary Frames — this is the function that directly satisfies the cross-chain optical-alignment use case (Section 3.3).
+8. Write `tests/test_stats.py`:
+   - Construct a small synthetic `TrialData` with known, hand-computed pose errors (don't run the full MC engine — directly build the `TrialData` fields) and confirm `frame_envelope_box` returns the expected min/max.
+   - Confirm `relative_pose_trials` between a Frame and itself returns identity for every trial (trivial sanity check).
+   - Confirm `point_pair_envelope_box` between two Frames sharing a common upstream edge correctly reflects that the shared edge's contribution cancels out of the *relative* error (a key qualitative check that validates the whole point of Section 2.4's shared-sampling design — relative tolerance between two downstream points should be tighter than either point's absolute tolerance when they share a noisy common ancestor edge).
+   - Confirm the different-component case raises a clear error.
+
+**Interfaces:**
+
+- *Depends on:* `sim/monte_carlo_fk.py` (`TrialData`), `core/frame_graph.py` (`FrameGraph`, for same-component validation only), `numpy`, `scipy.spatial.transform` (if used for rotation error extraction per Step 1).
+- *Used by:* `postprocess/bounding_shapes.py` (consumes the error vectors/point clouds this module produces), `postprocess/reporting.py` (consumes histogram data and envelope boxes for plotting), `sim/allocation.py` (consumes `point_pair_envelope_box` during the MC validation pass), eventually `gui/results_viewer/` and `gui/point_pair_panel/`.
+- *Public API (conceptual):*
+  ```
+  pose_error_vector_batch(poses, nominal) -> np.ndarray (N,6)
+  frame_envelope_box(trial_data, frame_name) -> dict
+  frame_percentiles(trial_data, frame_name, percentiles) -> dict
+  frame_histogram_data(trial_data, frame_name, dof_index, bins) -> (counts, edges)
+  relative_pose_trials(trial_data, frame_graph, frame_a, frame_b) -> np.ndarray (N,4,4)
+  point_pair_envelope_box(trial_data, frame_graph, frame_a, frame_b) -> dict
+  ```
+
+---
 
 ## 6.9 `postprocess/bounding_shapes.py`
 
-**Responsibility:** Fits bounding shapes to stored trial point clouds: axis-aligned box, bounding ellipsoid/sphere for translation `(N,3)` point clouds, and a bounding cone (or per-axis box — pending final decision, Section 8) for rotation-vector `(N,3)` point clouds. This is the module responsible for producing the "bounding shape the engineer can use to make decisions" deliverable.
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
 
-*(Detailed spec pending — to be expanded during Milestone B, Task B1.)*
+**Responsibility:** Fits bounding shapes (box, ellipsoid/sphere for translation; cone or per-axis box for rotation) to the error-vector point clouds produced by `postprocess/stats.py`. This is the module responsible for the "bounding shape the engineer can use to make decisions" deliverable (Section 1.1, Section 3.1).
+
+**Deliverables:**
+
+- Axis-aligned bounding box fitting (translation and rotation, trivial — already substantially covered by `stats.py`'s envelope functions; this module focuses on the non-trivial shapes)
+- Bounding ellipsoid/sphere fitting for translation point clouds
+- Bounding cone fitting for rotation-vector point clouds — **confirmed lead representation, locked 2026-06-23** (per-axis box still implemented as a cheap secondary cross-check, not as the primary reported value)
+- `tests/test_bounding_shapes.py` (new test file — add to the tree)
+
+**Granular Task List:**
+
+1. Implement `fit_bounding_sphere(points: np.ndarray) -> dict(center, radius)` for a `(N,3)` translation point cloud — minimum enclosing sphere (e.g., Welzl's algorithm, or a simpler/conservative approach such as centroid + max distance, which is non-optimal but simple and always-correct as a bound — **recommend the simpler conservative approach for v1**, since this is an error-budgeting tool, not a computational-geometry showcase, and a slightly loose conservative bound is preferable to added complexity/risk of an exact-minimum-enclosing-sphere implementation bug).
+2. Implement `fit_bounding_ellipsoid(points: np.ndarray, coverage=1.0) -> dict(center, axes_lengths, axes_directions)`: for `coverage=1.0` (full worst-case), fit via the covariance-matrix/eigenvalue approach scaled to just enclose all points; for `coverage<1.0` (e.g., 0.997 for a 3σ-equivalent statistical ellipsoid), scale using the appropriate chi-squared quantile for 3 degrees of freedom. Document this distinction clearly, since "ellipsoid that bounds 100% of points" and "ellipsoid that bounds 99.7% of points statistically" are different objects answering different questions (worst-case vs. statistical, per Section 2.5).
+3. **Rotation bounding shape — locked decision (2026-06-23): the cone is the lead representation.** Implement both of the following, but treat the cone as the primary reported value everywhere a single number/shape is needed (e.g., a results-viewer headline figure, a one-line summary in a report) — the box remains available as a secondary, more granular cross-check:
+   - `fit_rotation_cone(rotvecs: np.ndarray) -> dict(max_angle, mean_axis)` — **primary.** Single worst-case tilt-angle-from-nominal magnitude, regardless of direction, plus the mean tilt axis for reference. This is the number an engineer reads first when asking "how far off-axis could this interface tip?"
+   - `fit_rotation_box(rotvecs: np.ndarray) -> dict(min, max)` — **secondary.** Simple per-axis worst-case bounds (3 independent angle bounds), kept available for cases where the *direction* of angular error matters (e.g., pitch is much more sensitive than yaw for a given optical system) and a single isotropic cone magnitude would obscure that asymmetry.
+   - This task remains explicitly flagged for project-owner confirmation on which becomes the "default/leading" report in the GUI (Section 6.17) once Milestone B begins — implementing both now means no rework either way.
+4. Implement `fit_bounding_box(points: np.ndarray) -> dict(min, max)`: thin, explicit axis-aligned box fit (kept here for symmetry with the ellipsoid/cone fitters, even though `postprocess/stats.py`'s `frame_envelope_box` already effectively computes this for the 6-DoF case — this version operates on arbitrary 3D point clouds for reuse by both translation and rotation-box fits).
+5. Write `tests/test_bounding_shapes.py`:
+   - Synthetic point cloud with a known, constructed bounding sphere/ellipsoid (e.g., points placed exactly on a known ellipsoid surface) — confirm the fitted shape matches within numerical tolerance.
+   - Confirm the `coverage<1.0` statistical ellipsoid is strictly smaller than the `coverage=1.0` worst-case ellipsoid for the same point cloud (sanity check on the chi-squared scaling).
+   - Confirm `fit_rotation_box` and `fit_rotation_cone` agree on simple, symmetric synthetic cases (e.g., isotropic rotation-vector noise) where both representations should imply the same effective bound — this remains a useful cross-check even with the cone as the lead representation, since it catches a fitting bug in either function.
+
+**Interfaces:**
+
+- *Depends on:* `postprocess/stats.py` (consumes the error-vector point clouds it produces — e.g., calls `pose_error_vector_batch` and slices out translation or rotation columns), `numpy`, `scipy.stats` (chi-squared quantiles for statistical ellipsoid scaling).
+- *Used by:* `postprocess/reporting.py` (renders the fitted shapes), eventually `gui/results_viewer/`.
+- *Public API (conceptual):*
+  ```
+  fit_bounding_box(points) -> dict(min, max)
+  fit_bounding_sphere(points) -> dict(center, radius)
+  fit_bounding_ellipsoid(points, coverage=1.0) -> dict(center, axes_lengths, axes_directions)
+  fit_rotation_box(rotvecs) -> dict(min, max)
+  fit_rotation_cone(rotvecs) -> dict(max_angle, mean_axis)
+  ```
+
+---
 
 ## 6.10 `postprocess/reporting.py`
 
-**Responsibility:** Generates Matplotlib plots from post-processed statistics and bounding shapes: per-DoF histograms, and 2D projections (XY/XZ/YZ, plus a separate rotation-error plot) of the fitted bounding shapes, per the V1.0 decision to use 2D projections rather than a rotatable 3D viewer (Section 8).
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
 
-*(Detailed spec pending — to be expanded during Milestone B.)*
+**Responsibility:** Generates Matplotlib plots from the statistics (`postprocess/stats.py`) and fitted shapes (`postprocess/bounding_shapes.py`): per-DoF histograms and 2D projections of bounding shapes, per the locked decision to use 2D projections rather than a rotatable 3D viewer (Section 8).
+
+**Deliverables:**
+
+- Per-DoF histogram plotting function
+- 2D projection plotting for translation bounding shapes (XY/XZ/YZ)
+- 2D plotting for rotation bounding box/cone representations
+- `tests/test_reporting.py` (smoke tests only — rendering correctness is best verified visually, not asserted numerically)
+
+**Granular Task List:**
+
+1. Implement `plot_histogram(counts, bin_edges, dof_label, ax=None) -> matplotlib.axes.Axes`: single-DoF histogram, returns the Axes so callers (GUI or examples scripts) can embed or further customize it rather than this function owning figure-level layout decisions.
+2. Implement `plot_translation_projection(points: np.ndarray, bounding_shape: dict, plane: Literal["xy","xz","yz"], ax=None) -> matplotlib.axes.Axes`: scatter the trial point cloud (or a representative subsample if `N` is large — define a practical subsampling cutoff, e.g., 2000 points, to keep plots legible and fast) projected onto the requested plane, overlay the bounding box/ellipse outline for that projection.
+3. Implement `plot_rotation_summary(rotvecs: np.ndarray, cone: dict, box: dict, ax=None) -> matplotlib.axes.Axes`: a combined view with the cone (locked 2026-06-23 as the lead representation, per Section 6.9 Step 3) drawn as the prominent primary element — e.g., a shaded cone/circle at `max_angle` with the `mean_axis` marked — and the per-axis box rendered as a smaller, secondary annotation (e.g., three thin tick marks or a corner inset) rather than as a co-equal visual.
+4. Implement a top-level convenience function `generate_frame_report(trial_data, frame_name) -> matplotlib.figure.Figure`: assembles a multi-panel figure (3 translation histograms + 3 rotation histograms + 2–3 translation projections + 1 rotation summary) for a single Frame in one call — this is what `examples/` scripts and eventually the GUI results viewer will call most often.
+5. Write `tests/test_reporting.py` as smoke tests: confirm each plotting function runs without raising on representative synthetic data and returns a valid `Axes`/`Figure` object — do not attempt to assert on pixel content; visual correctness is a human-review concern, not an automated-test concern.
+
+**Interfaces:**
+
+- *Depends on:* `postprocess/stats.py`, `postprocess/bounding_shapes.py`, `matplotlib`.
+- *Used by:* `examples/` scripts directly (Milestone A), eventually `gui/results_viewer/` (Milestone B, likely embedding these same Figures/Axes into Qt widgets via Matplotlib's Qt backend rather than re-implementing plotting logic in the GUI layer).
+- *Public API (conceptual):*
+  ```
+  plot_histogram(counts, bin_edges, dof_label, ax=None) -> Axes
+  plot_translation_projection(points, bounding_shape, plane, ax=None) -> Axes
+  plot_rotation_summary(rotvecs, cone, box, ax=None) -> Axes
+  generate_frame_report(trial_data, frame_name) -> Figure
+  ```
+
+---
 
 ## 6.11 `io/schema.py`
 
-**Responsibility:** Pydantic models defining the on-disk project data model: `Project`, `Frame`, `HTMEdge`, `ToleranceSpec`/`ToleranceSpec6`, `SimSettings` (mode, N trials, seed, distribution defaults, sigma-level default), and `SavedAnalysis` (persisted point-pair analyses, per Section 3.3). This schema is the **only** interface the GUI is allowed to read from or write to (Section 5.3) — `core`/`sim` objects are constructed from this schema only at "Run" time.
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
 
-*(Detailed spec pending — to be expanded during Milestone B, Task B4.)*
+**Responsibility:** Pydantic models defining the on-disk project data model — the only interface the GUI is permitted to read from or write to (Section 5.3).
+
+**Deliverables:**
+
+- `FrameModel`, `HTMEdgeModel`, `ToleranceSpecModel`/`ToleranceSpec6Model`, `SimSettingsModel`, `SavedAnalysisModel`, `ProjectModel`
+- Bidirectional conversion functions between these Pydantic models and the live `core`/`sim` objects (`FrameGraph`, `ToleranceSpec6`, etc.)
+- `tests/test_schema.py` (new test file)
+
+**Granular Task List:**
+
+1. Implement `ToleranceSpecModel` (Pydantic): mirrors `core/tolerance.py`'s `ToleranceSpec` fields with Pydantic-level validation (`bound >= 0`, `distribution` as a `Literal["uniform","normal"]`).
+2. Implement `ToleranceSpec6Model`: six `ToleranceSpecModel` fields, named `dx, dy, dz, rx, ry, rz` for on-disk readability (rather than an unlabeled list — a human or future tool opening the raw JSON should be able to read it directly).
+3. Implement `HTMInputModel`: a tagged union (Pydantic discriminated union) covering all four input representations (`xyz_euler`, `matrix`, `quaternion`, `screw`) — this is what preserves the "original input representation" metadata from `core/transforms.py`'s `HTM` (Section 6.1) on disk, so reloading a project shows the user's original entry format, not a canonicalized matrix.
+4. Implement `HTMEdgeModel`: `name`, `parent`, `child`, `nominal: HTMInputModel`, `tolerance: ToleranceSpec6Model`.
+5. Implement `FrameModel`: `name`, optional `metadata: dict`.
+6. Implement `SimSettingsModel`: `mode: Literal["fk_verification","ik_allocation"]`, `n_trials: int`, `seed: int`, `default_distribution: Literal["uniform","normal"]`, `default_sigma_level: float`.
+7. Implement `SavedAnalysisModel`: persisted point-pair analysis definitions (Section 3.3) — `name`, `frame_a`, `frame_b`, optionally a cached last-run result summary.
+8. Implement `ProjectModel`: top-level container — `frames: list[FrameModel]`, `edges: list[HTMEdgeModel]`, `sim_settings: SimSettingsModel`, `saved_analyses: list[SavedAnalysisModel]`.
+9. Implement `ProjectModel.validate_references()` (a Pydantic model validator, not just field validators): confirm every edge's `parent`/`child` refers to a declared Frame, and every `SavedAnalysisModel`'s `frame_a`/`frame_b` refers to declared Frames — catch dangling references at schema-validation time, before a `FrameGraph` is ever constructed from this data (Section 6.3's `validate_dag()` catches *topological* errors; this catches *referential* errors one layer earlier).
+10. Implement `project_model_to_frame_graph(project: ProjectModel) -> FrameGraph`: constructs a live `core/frame_graph.py` `FrameGraph` from a validated `ProjectModel`, using `core/transforms.py`'s constructors to rebuild each `HTM` from its tagged `HTMInputModel` representation.
+11. Implement `frame_graph_to_project_model(frame_graph: FrameGraph, sim_settings, saved_analyses) -> ProjectModel`: the inverse — used when saving.
+12. Write `tests/test_schema.py`:
+    - Round-trip test: build a `FrameGraph` directly in Python, convert to `ProjectModel`, back to `FrameGraph`, confirm the result is equivalent (same Frames, edges, nominal transforms within tolerance, same tolerance specs).
+    - Dangling-reference test: construct a `ProjectModel` with an edge referencing a non-existent Frame, confirm `validate_references()` raises with a specific, actionable message naming the bad reference.
+    - Input-representation round-trip: confirm a Frame originally entered via, e.g., screw coordinates is still tagged as `screw` after a save/load round-trip (not silently canonicalized to `matrix`).
+
+**Interfaces:**
+
+- *Depends on:* `core/transforms.py`, `core/tolerance.py`, `core/frame_graph.py` (for the conversion functions in Steps 10–11), `pydantic`.
+- *Used by:* `io/serializer.py` (Section 6.12), eventually every GUI panel (Section 5.3 — the GUI reads/writes only these models).
+- *Public API (conceptual):*
+  ```
+  ProjectModel, FrameModel, HTMEdgeModel, ToleranceSpec6Model, SimSettingsModel, SavedAnalysisModel
+  ProjectModel.validate_references() -> None  # raises on violation
+  project_model_to_frame_graph(project: ProjectModel) -> FrameGraph
+  frame_graph_to_project_model(frame_graph, sim_settings, saved_analyses) -> ProjectModel
+  ```
+
+---
 
 ## 6.12 `io/serializer.py`
 
-**Responsibility:** JSON save/load logic for the `io.schema` models, including validation-on-load that surfaces clear, actionable errors (e.g., graph cycles, dangling Frame references, malformed tolerance specs) before the engine is ever invoked.
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
 
-*(Detailed spec pending — to be expanded during Milestone B, Task B4.)*
+**Responsibility:** JSON save/load for `io.schema` models, surfacing clear, actionable validation errors before the engine is ever invoked.
+
+**Deliverables:**
+
+- `save_project(project: ProjectModel, path: str) -> None`
+- `load_project(path: str) -> ProjectModel`
+- Actionable error wrapping around raw Pydantic/JSON errors
+- `tests/test_serializer.py` (new test file)
+
+**Granular Task List:**
+
+1. Implement `save_project(project: ProjectModel, path: str) -> None`: serialize via Pydantic's `.model_dump_json(indent=2)` (human-readable, diff-friendly indentation) and write to disk.
+2. Implement `load_project(path: str) -> ProjectModel`: read the file, parse via `ProjectModel.model_validate_json(...)`, then explicitly call `.validate_references()` (Section 6.11 Step 9) as a second validation pass.
+3. Wrap both raw `pydantic.ValidationError` and basic file errors (missing file, malformed JSON) in a single project-specific exception type (e.g., `ProjectLoadError`) with a clear, human-readable message — do not let a raw Pydantic stack trace be the only thing the user/GUI sees on a malformed file.
+4. Add a `schema_version` field to `ProjectModel` (Section 6.11) at this stage, even though there's only one version today — write `load_project` to check it and raise a specific, friendly error if a future version mismatch occurs, rather than letting an old/new file format silently fail with a confusing generic error. (Cheap insurance now; expensive to retrofit later once real project files exist.)
+5. Write `tests/test_serializer.py`:
+   - Round-trip: save then load a representative `ProjectModel`, confirm equivalence.
+   - Malformed JSON: confirm `load_project` raises `ProjectLoadError` with a clear message, not a raw `JSONDecodeError`.
+   - Dangling reference in the file: confirm `load_project` surfaces the same actionable message as the direct `validate_references()` test in Section 6.11.
+   - Missing file: confirm a clear `ProjectLoadError`, not an unhandled `FileNotFoundError`.
+
+**Interfaces:**
+
+- *Depends on:* `io/schema.py` (`ProjectModel`), `pydantic`, `json`/standard library file I/O.
+- *Used by:* eventually `gui/main_window.py` (save/load/new-project actions), and any future CLI.
+- *Public API (conceptual):*
+  ```
+  save_project(project: ProjectModel, path: str) -> None
+  load_project(path: str) -> ProjectModel   # raises ProjectLoadError
+  ```
+
+---
 
 ## 6.13 `gui/main_window.py`
 
-**Responsibility:** Top-level PySide6 application window; owns the currently-loaded `io.schema.Project`, hosts the other GUI panels (Sections 6.14–6.17) as docked or tabbed widgets, and owns the save/load/new-project actions.
+*(Last revised: 2026-06-23 — Claude, detailed planning session. GUI modules are specified at a coarser grain than core/sim/postprocess/io, consistent with Section 10's rule that GUI work does not begin until Milestone A is complete — these task lists will be revisited and sharpened immediately before Milestone B begins.)*
 
-*(Detailed spec pending — to be expanded during Milestone B, Task B5–B9. GUI work does not begin until Milestone A is complete, per Section 10.)*
+**Responsibility:** Top-level PySide6 application window; owns the currently-loaded `ProjectModel`, hosts the other GUI panels, and owns save/load/new-project actions.
+
+**Deliverables:**
+
+- Main `QMainWindow` subclass with menu bar (New/Open/Save/Save As/Exit)
+- Docked or tabbed hosting of the panels in Sections 6.14–6.18
+- A single in-memory `ProjectModel` instance treated as the source of truth for the currently open project
+
+**Granular Task List (to be sharpened before Milestone B):**
+1. Implement the `QMainWindow` shell with a menu bar and status bar.
+2. Implement New/Open/Save/Save As actions, calling `io/serializer.py` directly (Section 5.3 — GUI talks to `io.schema` only).
+3. Implement a simple in-memory "dirty" flag (unsaved changes indicator) tied to edits made in any child panel.
+4. Lay out the child panels (Sections 6.14–6.18) as dock widgets or tabs — decide layout once those panels' own specs are sharpened immediately before Milestone B.
+5. Wire a top-level error-display mechanism (e.g., a status bar message or modal dialog) for surfacing `ProjectLoadError` and validation errors from `io/serializer.py` / `io/schema.py` in a user-friendly way.
+
+**Interfaces:**
+
+- *Depends on:* `io/schema.py`, `io/serializer.py`, all `gui/*` panel modules, `PySide6`.
+- *Used by:* the application entry point (`main.py`, not yet listed in Section 5.1 — add it as the top-level launch script when Milestone B begins).
+
+---
 
 ## 6.14 `gui/graph_editor/`
 
-**Responsibility:** GUI panel for building and editing the Frame graph — adding/removing Frames and HTM Edges, and entering each edge's nominal transform in any supported input format (Section 2.1).
+*(Last revised: 2026-06-23 — Claude, detailed planning session. Coarse-grained per Section 6.13's note.)*
 
-*(Detailed spec pending — to be expanded during Milestone B, Task B5.)*
+**Responsibility:** Build/edit the Frame graph — add/remove Frames and Edges, enter each edge's nominal transform in any supported format.
+
+**Granular Task List (to be sharpened before Milestone B):**
+1. A graph/tree view widget listing Frames and Edges (likely `QTreeWidget` or a lightweight embedded NetworkX-to-Qt graph view — decide once this task is reached).
+2. An "Add Frame" / "Add Edge" dialog flow, writing directly into the in-memory `ProjectModel` (never into a live `FrameGraph`, per Section 5.3).
+3. A multi-format HTM entry widget supporting all four input representations (Section 2.1), with a format-selector control and live validation feedback (e.g., flagging a non-orthonormal raw-matrix entry immediately, reusing `core/transforms.py`'s `HTM` construction-time validation, Section 6.1 Step 3, as the validation backend).
+4. Visual indication of which Frame(s) are roots and which are junctions (shared by multiple downstream edges), to make the multi-chain structure legible to the user.
+
+**Interfaces:**
+
+- *Depends on:* `io/schema.py` (reads/writes `ProjectModel` directly), `core/transforms.py` (validation reuse), `PySide6`.
+- *Used by:* `gui/main_window.py`.
+
+---
 
 ## 6.15 `gui/tolerance_editor/`
 
-**Responsibility:** GUI panel for setting each edge's per-DoF tolerance specification: distribution type, bound, sigma-level (where applicable), and the locked flag (Section 2.2, Section 3.2).
+*(Last revised: 2026-06-23 — Claude, detailed planning session. Coarse-grained per Section 6.13's note.)*
 
-*(Detailed spec pending — to be expanded during Milestone B, Task B6.)*
+**Responsibility:** Per-edge, per-DoF tolerance entry: distribution, bound, sigma-level, locked flag.
+
+**Granular Task List (to be sharpened before Milestone B):**
+1. A per-edge panel exposing all 6 DoF, each with a distribution selector (`uniform`/`normal`), bound entry, conditionally-shown sigma-level entry (only when `normal` selected), and a locked checkbox.
+2. A "bulk apply" convenience action (e.g., "apply this distribution/sigma-level default to all DoF on this edge" or "...to all edges in this project") to avoid tedious repetitive entry — purely a UX nicety, not core to correctness.
+3. Live validation reusing `core/tolerance.py`'s `ToleranceSpec` construction-time checks (Section 6.2 Step 1).
+
+**Interfaces:**
+
+- *Depends on:* `io/schema.py`, `core/tolerance.py` (validation reuse), `PySide6`.
+- *Used by:* `gui/main_window.py`.
+
+---
 
 ## 6.16 `gui/run_panel/`
 
-**Responsibility:** GUI panel for configuring and triggering a simulation run: mode selection (FK verification vs. IK allocation), number of trials, random seed, and distribution settings.
+*(Last revised: 2026-06-23 — Claude, detailed planning session. Coarse-grained per Section 6.13's note.)*
 
-*(Detailed spec pending — to be expanded during Milestone B, Task B7.)*
+**Responsibility:** Configure and trigger a simulation run: mode selection, trial count, seed, distribution settings.
+
+**Granular Task List (to be sharpened before Milestone B):**
+1. Mode selector (FK verification vs. IK allocation), with the panel's visible fields changing based on selection (e.g., IK mode additionally needs a target Frame pair + target tolerance entry, reusing the `gui/tolerance_editor/` widget for the target's bound entry).
+2. Trial count and seed entry, with the seed defaulting to a random value but always displayed/editable (so a specific run is always reproducible by recording the seed shown).
+3. A "Run" button that constructs live `core`/`sim` objects from the current `ProjectModel` (the one and only place this conversion happens, per Section 5.3) and invokes the appropriate engine (`MonteCarloFKEngine` or `AllocationEngine`), likely on a background thread/`QThread` to avoid freezing the UI during larger runs.
+4. Progress indication for longer runs (even a simple indeterminate spinner is acceptable for v1, given the modest trial counts in Section 5.1/13's performance targets).
+
+**Interfaces:**
+
+- *Depends on:* `io/schema.py`, `core/frame_graph.py`, `sim/monte_carlo_fk.py`, `sim/allocation.py`, `PySide6`.
+- *Used by:* `gui/main_window.py`; produces the `TrialData`/`ValidationReport` that `gui/results_viewer/` consumes.
+
+---
 
 ## 6.17 `gui/results_viewer/`
 
-**Responsibility:** GUI panel for displaying simulation results: envelope summary tables, histograms, and 2D bounding-shape projections (Section 6.10), per Frame or per saved point-pair analysis.
+*(Last revised: 2026-06-23 — Claude, detailed planning session. Coarse-grained per Section 6.13's note.)*
 
-*(Detailed spec pending — to be expanded during Milestone B, Task B8.)*
+**Responsibility:** Display simulation results — envelope tables, histograms, 2D bounding-shape projections — per Frame or per saved point-pair analysis.
+
+**Granular Task List (to be sharpened before Milestone B):**
+1. A Frame/analysis selector driving which result set is currently displayed.
+2. An envelope summary table (reusing `postprocess/stats.py`'s `frame_envelope_box`/`point_pair_envelope_box` output directly).
+3. Embedded Matplotlib canvases (via `matplotlib.backends.backend_qtagg`) displaying `postprocess/reporting.py`'s `generate_frame_report()` output — reuse the plotting module's Figures directly rather than re-implementing plotting in Qt-native widgets.
+4. Display of rotation error per the locked 2026-06-23 decision: the bounding cone (`max_angle`, `mean_axis`) is the headline figure for angular uncertainty, with the per-axis box available as a secondary/expandable detail (e.g., a "show per-axis breakdown" toggle) rather than displayed with equal visual weight.
+
+**Interfaces:**
+
+- *Depends on:* `postprocess/stats.py`, `postprocess/reporting.py`, `PySide6`, `matplotlib`.
+- *Used by:* `gui/main_window.py`.
+
+---
 
 ## 6.18 `gui/point_pair_panel/`
 
-**Responsibility:** GUI panel for defining and persisting point-pair analyses (Section 3.3) — letting the user select any two Frames, view their relative-pose envelope, and save that analysis definition into the project file for future re-use.
+*(Last revised: 2026-06-23 — Claude, detailed planning session. Coarse-grained per Section 6.13's note.)*
 
-*(Detailed spec pending — to be expanded during Milestone B, Task B9.)*
+**Responsibility:** Define and persist point-pair analyses — select any two Frames, view their relative-pose envelope, save the analysis definition into the project file.
+
+**Granular Task List (to be sharpened before Milestone B):**
+1. A two-Frame selector (dropdowns or graph-click selection, reusing the Frame list from `gui/graph_editor/`'s underlying `ProjectModel`).
+2. A "Save Analysis" action writing a new `SavedAnalysisModel` entry into the `ProjectModel` (Section 6.11 Step 7), so it persists across save/load.
+3. Display of the resulting relative-pose envelope, reusing `gui/results_viewer/`'s display components rather than duplicating presentation logic.
+4. A same-component validation check at selection time (reusing `core/frame_graph.py`'s `weakly_connected_components()`), giving immediate UI feedback (e.g., greying out an invalid second-Frame selection) rather than only erroring after a run.
+
+**Interfaces:**
+
+- *Depends on:* `io/schema.py`, `core/frame_graph.py`, `postprocess/stats.py`, `gui/results_viewer/` (shared display components), `PySide6`.
+- *Used by:* `gui/main_window.py`.
+
+---
 
 ## 6.19 `examples/`
 
-**Responsibility:** Hand-verified, fully worked example scripts demonstrating end-to-end usage of the engine (Section 9) — not a code module in the traditional sense, but a required deliverable of Milestone A (Task A7) that doubles as both onboarding material and a regression-test reference.
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+
+**Responsibility:** Hand-verified, fully worked example scripts demonstrating end-to-end engine usage — required Milestone A deliverable (Task A7), doubling as onboarding material and a regression-test reference.
+
+**Deliverables:**
+
+- At least one fully worked, commented script using a real or representative precision-machine-design problem
+- At least one script demonstrating the multi-chain/shared-frame (optical-mount-style) use case explicitly, since this is the most architecturally distinctive capability and deserves a dedicated, legible demonstration separate from the unit tests
+
+**Granular Task List:**
+
+1. Write `examples/single_chain_fk_example.py`: define a simple 3–4 edge serial chain representative of a real mechanical stack-up, set tolerances on each edge (mixing `uniform` and `normal` for illustration), run `MonteCarloFKEngine`, print/plot the resulting envelope via `postprocess/reporting.py`'s `generate_frame_report()`.
+2. Write `examples/multi_chain_shared_frame_example.py`: define two chains sharing a common upstream Frame (the optical-mount scenario from Section 1.1/1.3), run the FK engine once, and explicitly demonstrate `postprocess/stats.py`'s `point_pair_envelope_box()` between Frames on the two different downstream branches — with inline commentary explaining why the relative tolerance is tighter than either branch's absolute tolerance (the shared-ancestor cancellation effect).
+3. Write `examples/allocation_example.py` (added once Milestone B's `sim/allocation.py` exists): define a chain with unset/free tolerances, specify a target end-effector envelope, run `AllocationEngine.solve()` and `.validate()`, print the proposed tolerances and the validation discrepancy report.
+4. Each script should be runnable standalone (`python examples/single_chain_fk_example.py`) with no GUI dependency, and should print enough intermediate information (not just a final plot) that a reader can follow the logic without running it themselves.
+
+**Interfaces:**
+
+- *Depends on:* the full `core`/`sim`/`postprocess` stack (this is integration-level usage, not a module with its own internal logic).
+- *Used by:* the project owner directly (onboarding/reference), and indirectly by `tests/` as a source of representative scenarios worth turning into regression tests.
+
+---
 
 ## 6.20 `tests/`
 
-**Responsibility:** Unit and integration test suite. Houses the hand-calculable validation cases described in Section 9 for every core math module, plus dedicated regression tests for the Monte-Carlo-consistency-across-shared-edges property (Section 2.4) and the allocation engine's MC-validation discrepancy check (Section 3.2).
+*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+
+**Responsibility:** The full unit/integration test suite. Houses every hand-calculable validation case described per-module above, plus the dedicated cross-cutting regression tests called out in Section 9.
+
+**Deliverables (test files, consolidated from the per-module task lists above — listed here as the authoritative index):**
+- `test_transforms.py` (Section 6.1)
+- `test_tolerance.py` (Section 6.2, also covers `core/sampling.py` per Section 6.5)
+- `test_frame_graph.py` (Section 6.3)
+- `test_monte_carlo_fk.py` (Section 6.6)
+- `test_allocation.py` (Section 6.7)
+- `test_stats.py` (Section 6.8 — **new, not in the original Section 5.1 tree; add it**)
+- `test_bounding_shapes.py` (Section 6.9 — **new, add it**)
+- `test_reporting.py` (Section 6.10 — **new, add it; smoke tests only**)
+- `test_schema.py` (Section 6.11 — **new, add it**)
+- `test_serializer.py` (Section 6.12 — **new, add it**)
+
+**Granular Task List (cross-cutting, beyond what's already specified per-module above):**
+1. Set up `pytest` configuration (`pytest.ini` or `pyproject.toml` section) with a shared `conftest.py` providing reusable fixtures: a few representative small `FrameGraph` instances (2-edge chain, 3-edge chain, shared-frame multi-chain graph) so individual test files don't each re-build their own from scratch.
+2. Establish and document a single shared numerical tolerance convention for floating-point assertions across the whole suite (e.g., a `conftest.py`-level constant `DEFAULT_ATOL = 1e-9` for exact/near-exact checks and a separate, looser `SMALL_ANGLE_ATOL` for checks that are expected to carry small-angle-approximation residual error) — prevents each test file from inventing its own ad hoc tolerance values.
+3. Implement the dedicated Monte-Carlo-shared-edge-consistency regression test (Section 9, Item 3) as its own clearly-named test function, not buried inside a more general `test_monte_carlo_fk.py` test — it should be findable by name (e.g., `test_shared_edge_sampling_consistency`) given how architecturally important this property is.
+4. Implement the dedicated allocation MC-validation-discrepancy test (Section 9, Item 4) similarly, as its own clearly-named function in `test_allocation.py`.
+5. Add a CI-friendly entry point (a simple `pytest` invocation documented in the repo `README.md`) so the full suite can be run with one command at the start of every work session — this is the practical mechanism that actually enforces Section 10's "engine must be proven before GUI work begins" rule.
+
+**Interfaces:**
+
+- *Depends on:* every module in the codebase, by design.
+- *Used by:* the project owner and any future Claude Code session, as the primary mechanism for confirming nothing has silently broken between sessions.
 
 ---
 
@@ -367,13 +983,13 @@ This section gives every code module in the architecture (Section 5.1) its own d
 
 | # | Task | Module(s) | Est. Hours |
 |---|---|---|---|
-| A1 | `HTM` class: canonical 4x4 storage, constructors/converters wrapping pytransform3d, `compose`/`inverse` | `core/transforms.py` | 4–6 |
-| A2 | `ToleranceSpec` / `ToleranceSpec6`: per-DoF uniform + normal sampling via `scipy.stats`, sigma-level handling, local-frame right-multiply perturbation composition (Section 2.2.2) | `core/tolerance.py` | 5–8 |
+| A1 | `HTM` class: canonical 4x4 storage, constructors/converters wrapping pytransform3d, `compose`/`inverse` | `core/transforms.py`, `core/conversions.py` | 4–6 |
+| A2 | `ToleranceSpec` / `ToleranceSpec6`: per-DoF uniform + normal sampling via `scipy.stats`, sigma-level handling, local-frame right-multiply perturbation composition (Section 2.2.2) | `core/tolerance.py`, `core/sampling.py` | 5–8 |
 | A3 | `Frame` / `HTMEdge` / `FrameGraph`: NetworkX-backed graph, DAG validation with clear error messages, path-finding between arbitrary frames | `core/frame_graph.py` | 4–6 |
-| A4 | Monte Carlo FK engine: vectorized batched sampling and chain composition, per-Frame trial-data storage | `sim/monte_carlo_fk.py` | 8–10 |
+| A4 | Monte Carlo FK engine: vectorized batched sampling and chain composition, per-Frame trial-data storage, per-edge RNG sub-stream derivation | `sim/monte_carlo_fk.py` | 8–10 |
 | A5 | Post-processing stats: envelope (min/max box), percentile tables, basic histogram data, point-pair relative-transform stats from stored trial data | `postprocess/stats.py` | 6–8 |
-| A6 | Hand-verified test cases: 2–3 simple chains (e.g., a 2-edge and a 3-edge chain) checked against manual small-angle calculations | `tests/` | 6–8 |
-| A7 | Example script(s) / minimal CLI demonstrating end-to-end usage on a real or representative problem | `examples/` | 3–5 |
+| A6 | Hand-verified test cases: 2–3 simple chains (e.g., a 2-edge and a 3-edge chain) checked against manual small-angle calculations; shared-edge consistency regression test; `conftest.py` shared fixtures | `tests/` | 6–8 |
+| A7 | Example script(s) / minimal CLI demonstrating end-to-end usage on a real or representative problem, including the multi-chain/shared-frame demonstration | `examples/` | 3–5 |
 
 **Milestone A exit criteria:** Project owner can define a real kinematic chain from their own work in a Python script, run both worst-case and statistical Monte Carlo FK verification, and trust the printed/plotted envelope output because it has been checked against at least one hand calculation.
 
@@ -425,10 +1041,15 @@ These were explicit decisions made during project scoping and should be treated 
 | DoF/edge correlation | None — all 6 DoF per edge, and all edges, treated as statistically independent |
 | FK chain topology | Strictly serial / open / DAG with max one incoming edge per Frame — no closed loops, no parallel mechanisms |
 | Inverse allocation objective (v1) | Equal allocation across free/unlocked edges only |
-| Rotation bounding shape (v1) | [TO BE CONFIRMED — pending project owner answer: per-axis box vs. single worst-case tilt-angle cone. Default assumption until confirmed: report both, lead with per-axis box.] |
+| Rotation bounding shape (v1) | **Cone** (`max_angle` + `mean_axis`) is the confirmed lead representation, locked 2026-06-23. Per-axis box still implemented as a secondary/expandable cross-check (Section 6.9), not displayed with equal prominence. |
 | Bounding shape visualization | 2D projections (not a true rotatable 3D viewer) |
 | GUI framework | PySide6, desktop, local-only, no server/browser split |
 | Project file format | JSON via Pydantic schema |
+| TrialData pose storage | Full 4x4 HTM per Frame per trial (not a reduced 6-vector) — locked 2026-06-23 |
+| Euler angle convention | Intrinsic ZYX — locked 2026-06-23 |
+| IK Jacobian/sensitivity method | Analytical/closed-form via small-angle adjoint transformation; finite-difference used only as a test-suite correctness oracle, never in production code — locked 2026-06-23 |
+| Monte Carlo RNG strategy | Per-edge keyed sub-streams (`SeedSequence` spawned from a deterministic hash of edge name), owned by `sim/monte_carlo_fk.py` — guarantees one edge's samples are unaffected by changes elsewhere in the graph — locked 2026-06-23 |
+| `core/sampling.py` location | Relocated from originally-planned `sim/sampling.py` to `core/sampling.py` to fix a backwards dependency (`core/tolerance.py` needs it) — locked 2026-06-23 |
 
 ---
 
@@ -460,4 +1081,7 @@ Because this tool produces engineering decisions about physical hardware toleran
 |---|---|---|
 | 2026-06-22 | [Project Owner] | Initial project plan created. Architecture, conventions, library choices, and two-milestone phased plan (V0.5 / V1.0) established per project scoping discussion. |
 | 2026-06-22 | [Project Owner] | Converted document to .docx for easier future editing. Reframed document as a combined design specification + project plan (not just a plan). Added required Name column to this changelog. Added Section 6 (Module Specifications) with a dedicated subsection for every code module in the architecture, to be expanded with detailed specs over time. |
+| 2026-06-23 | Claude (detailed planning session, at Project Owner's request) | Expanded every module subsection in Section 6 from a brief description into a full granular spec: explicit deliverables, ordered task lists, and inter-module interfaces (depends-on / used-by / public API). Locked four previously-open implementation decisions: (1) `TrialData` stores full 4x4 poses per Frame per trial; (2) Euler convention fixed as intrinsic ZYX; (3) IK Jacobian computed analytically via small-angle adjoint transformation, with finite-difference reserved for test-suite validation only; (4) Monte Carlo RNG uses per-edge keyed sub-streams owned by the FK engine. Corrected an architectural error: relocated `sampling.py` from `sim/` to `core/` to fix a backwards dependency. Updated the Section 5.1 directory tree, the Milestone A task table, and the Section 8 reference table accordingly. Rotation bounding-shape representation (per-axis box vs. cone) remains explicitly open — both will be implemented so the project owner can compare directly. |
+| 2026-06-23 | Project Owner | Confirmed `locked` semantics in `core/tolerance.py` (Section 6.2): a locked DoF is still sampled in FK mode (it has a real, fixed physical tolerance); `locked` only excludes it from the free-variable set in inverse allocation (Section 6.7). No change to the document, decision confirmed as already specified. |
+| 2026-06-23 | Project Owner | Resolved the previously-open rotation bounding-shape decision: **the cone (`max_angle` + `mean_axis`) is the confirmed lead representation** for angular error, with the per-axis box retained as a secondary/expandable cross-check rather than a co-equal display. Updated Section 6.9 (`postprocess/bounding_shapes.py`), Section 6.10 (`postprocess/reporting.py`), Section 6.17 (`gui/results_viewer/`), and the Section 8 reference table accordingly. |
 
