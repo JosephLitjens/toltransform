@@ -12,5 +12,14 @@ source venv/bin/activate  # or venv\Scripts\Activate.ps1 on Windows
 pip install -r requirements.txt
 \`\`\`
 
+## Running Tests
+
+```bash
+source .venv/bin/activate
+python -m pytest tests/ -q
+```
+
+All tests must pass before beginning GUI work (Section 10 of the design spec). Run this at the start of every session to confirm nothing has silently broken.
+
 ## Status
-Milestone A (V0.5) in progress.
+Milestone A (V0.5) in progress — A1–A6 complete, A7 (examples/CLI) next.
