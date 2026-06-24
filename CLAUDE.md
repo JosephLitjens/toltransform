@@ -62,8 +62,8 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
 - **Current milestone:** A (in progress)
-- **Last completed task:** A5 — `postprocess/stats.py` (commit `019eb34`, 26 tests, 115 total passing)
-- **Next task:** A6 — hand-verified test cases + `conftest.py` shared fixtures (Section 6.20)
+- **Last completed task:** A6 — `tests/conftest.py` + `tests/test_integration.py` + `tests/test_allocation.py` placeholder + README (commit `83b8ee3`, 15 new tests, 130 total passed, 1 skipped)
+- **Next task:** A7 — `examples/single_chain_fk_example.py` + `examples/multi_chain_shared_frame_example.py` (Section 6.19)
 
 **Note on venv:** the venv is at `.venv/` (not `venv/`). Use `source .venv/bin/activate`.
 
@@ -73,6 +73,7 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 - A3: `core/frame_graph.py` — commit `d81645c` (24 tests); also completes B1-1 (adjoint/compute_sensitivity built here)
 - A4: `sim/monte_carlo_fk.py` — commit `744c562` (18 tests)
 - A5: `postprocess/stats.py` — commit `019eb34` (26 tests); rotation error via scipy Rotation.as_rotvec(); shared-ancestor cancellation test confirms Section 2.4 property
+- A6: `tests/conftest.py` + `tests/test_integration.py` + `tests/test_allocation.py` placeholder — commit `83b8ee3` (15 tests); DEFAULT_ATOL=1e-9, SMALL_ANGLE_ATOL=1e-6; lever-arm coupling and local-frame routing integration tests; Section 9 Item 3 named standalone regression
 
 **Two math corrections made in A3 (documented in Section 11 changelog and Section 6.3 task list):**
 - Adjoint formula: `[[R, skew(t)@R],[0,R]]` — NOT `[[R,0],[skew(t)@R,R]]`
