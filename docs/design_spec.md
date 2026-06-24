@@ -2,7 +2,7 @@
 title: "TolTransform: Design Specifications & Project Plan"
 subtitle: "A Kinematic Error-Budgeting Tool for Precision Machine Design"
 author: "Living Engineering Document — Architecture, Module Specifications, and Phased Plan"
-date: "Last updated: 2026-06-22"
+date: "Last updated: 2026-06-24"
 geometry: margin=1in
 fontsize: 11pt
 toc: true
@@ -347,12 +347,12 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 9. Implement `compose(other: HTM) -> HTM` = matrix product; the result's `input_representation` is `None`/`"composed"` (composing two transforms has no single faithful "input representation").
 10. Implement `inverse() -> HTM` using the closed-form rigid-body inverse (`R.T`, `-R.T @ t`) rather than `np.linalg.inv`, for numerical robustness and speed.
 11. Implement `__repr__` (human-readable, shows translation + Euler angles for quick debugging) and a tolerance-aware `__eq__` (or a dedicated `is_close(other, atol)` method, since exact float equality on transforms is rarely meaningful).
-12. Write `tests/test_transforms.py`:
-    - Hand-calculated cases: pure translation; pure single-axis rotation; combined rotation + translation — each checked against a matrix computed manually (not just re-deriving the same code path).
-    - Round-trip tests: construct via each of the 4 constructors, convert back via the corresponding "to" method, confirm recovery within tolerance.
-    - Composition test: compose two known transforms, check against hand-multiplied result.
-    - Inverse test: confirm `T.compose(T.inverse())` is the identity within tolerance, for several non-trivial `T`.
-    - Edge case: near-gimbal-lock Euler angle input (e.g., 89.9° pitch in the locked convention) to confirm graceful, correct handling.
+12. ✅ **Done (A1, `a31218e`)** Write `tests/test_transforms.py` (26 tests):
+    - ✅ Hand-calculated cases: pure translation; pure single-axis rotation; combined rotation + translation.
+    - ✅ Round-trip tests: all 4 constructors (xyz_euler, matrix, quaternion, screw) with round-trip recovery within tolerance.
+    - ✅ Composition test: hand-multiplied result check.
+    - ✅ Inverse test: `T.compose(T.inverse()) ≈ I` for several non-trivial T.
+    - ✅ Edge case: near-gimbal-lock Euler angle input (89.9° pitch) handled gracefully.
 
 **Interfaces:**
 
@@ -397,12 +397,12 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 7. Implement `small_angle_rotation_matrix_batch(rotvec_batch: np.ndarray) -> np.ndarray` shape `(N,3,3)`: build `R ≈ I + skew(rotvec)` per Section 2.2.2, then re-orthonormalize each matrix (e.g., one Newton/Schulz iteration or a single SVD-based projection) — document *why*: the first-order small-angle expansion is not exactly orthonormal, and downstream code (`HTM.inverse()`, `HTM.compose()`) assumes a valid rotation matrix.
 8. Implement `delta_to_htm_batch(delta_batch: np.ndarray) -> np.ndarray` shape `(N,4,4)`: assemble the batched perturbation HTM directly from the translation columns and the Step 7 rotation block.
 9. Implement `apply_perturbation_batch(nominal: HTM, delta_batch: np.ndarray) -> np.ndarray` shape `(N,4,4)`: per Section 2.2.2's locked local-frame right-multiply convention, `T_perturbed[i] = nominal.matrix @ delta_to_htm_batch(delta_batch)[i]`, implemented as a single vectorized batched matrix multiply (`np.einsum` or broadcasted `@`) — **no Python-level loop over `i`.**
-10. Write `tests/test_tolerance.py`:
-    - Zero-delta case: `apply_perturbation_batch` with an all-zero `delta_batch` returns the nominal matrix exactly (within floating-point tolerance) for every trial.
-    - Known small-angle case: a single nonzero `rx` perturbation produces a rotation matrix matching a manually computed `I + skew(rx,0,0)` to within the expected small-angle residual.
-    - Re-orthonormalization sanity check: confirm the orthonormalization step does not perceptibly distort a known sub-degree perturbation (error below a documented threshold, e.g., `1e-9`).
-    - `ToleranceSpec6.sample` shape/bounds check: for `"uniform"`, confirm all samples fall within `[-bound, +bound]`; for `"normal"`, confirm the empirical standard deviation over a large `n_trials` is close to `bound / sigma_level`.
-    - Confirm `locked=True` specs are still sampled (per Step 5's decision) — this is a regression test guarding against accidentally "fixing" the bug later in a way that silently breaks FK mode.
+10. ✅ **Done (A2, `3ac0eed`)** Write `tests/test_tolerance.py` (21 tests):
+    - ✅ Zero-delta case: `apply_perturbation_batch` with all-zero `delta_batch` returns nominal exactly.
+    - ✅ Known small-angle case: single nonzero `rx` produces rotation matrix matching `I + skew(rx,0,0)`.
+    - ✅ Re-orthonormalization sanity check: distortion below documented threshold.
+    - ✅ `ToleranceSpec6.sample` shape/bounds check: uniform samples within `[-bound, +bound]`; normal empirical σ ≈ `bound / sigma_level`.
+    - ✅ `locked=True` specs are still sampled — regression test guarding Section 2.2.1 semantics.
 
 **Interfaces:**
 
@@ -466,14 +466,14 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
       ```
       using the `[v, ω]` ordering that matches `delta = [dx, dy, dz, rx, ry, rz]`. The top-right block `skew(t)@R` couples the ω input to the v output; the bottom-left block is zero. An earlier draft of this spec mistakenly wrote `[[R, 0],[skew(t)@R, R]]`, which is the `[ω, v]` convention — the finite-difference cross-check in `tests/test_frame_graph.py` caught this and confirmed the corrected form. The adjoint convention must agree with the perturbation convention (Section 2.2.2) or any downstream sensitivity computation is silently wrong.
     - Implement `compute_sensitivity(frame_graph, frame_a, frame_b, edge_names: list[str]) -> np.ndarray` shape `(6, 6*len(edge_names))`: for each named edge on the path between `frame_a` and `frame_b` (typically the full `path_edges_between()` result, or a caller-supplied subset), compute its 6×6 sensitivity block as `adjoint(T_{frame_a → exit_node_i})`, where `exit_node_i` is the node arrived at after traversing edge i (i.e., `edge.child` for forward traversal, `edge.parent` for reverse). **Corrected formula (2026-06-24):** an earlier draft specified `adjoint(T_{exit_node → frame_b})` (the adjoint from the exit node to frame_b), which is incorrect. The correct derivation is: a small perturbation δT at edge i produces `T_perturbed @ T_nominal⁻¹ = T_{frame_a→exit_i} @ T_delta @ T_{frame_a→exit_i}⁻¹`, giving `J_i = Ad_{T_{frame_a→exit_i}}`. Confirmed by the finite-difference cross-check in `tests/test_frame_graph.py`. This function makes no assumption about *why* the caller wants the sensitivity — it is equally valid input to a Pareto variance breakdown (Section 6.8) or an inverse allocation solve (Section 6.7).
-14. Write `tests/test_frame_graph.py`:
-    - Cycle detection: build a graph with an intentional cycle, confirm `validate_dag()` raises and correctly reports the cycle path.
-    - Multiple-incoming-edge detection: build a graph where one Frame has two parents, confirm `validate_dag()` raises and names the Frame.
-    - Root identification: multi-component graph (two unrelated chains, no shared Frame) — confirm `root_frames()` returns both roots correctly.
-    - Shared-frame (junction) case: two chains sharing a common upstream Frame — confirm `nominal_transform_between()` correctly composes through the shared ancestor for Frames on different downstream branches.
-    - Different-component case: confirm `nominal_transform_between()` raises `DisjointFramesError` with the exact locked message text (Section 2.3.1), naming both Frames — not a generic NetworkX exception.
-    - Common-physical-base pattern (Section 2.3.1): build two independently-rooted chains, explicitly connect both roots to a shared `"base"` Frame via real edges (one zero-tolerance, one with a nonzero tolerance), confirm `nominal_transform_between()` now succeeds between Frames on the two different chains and correctly propagates the base-attachment edges' tolerances into the result — this is the regression test proving the documented workaround in Section 2.3.1 actually works end-to-end, not just in the documentation's prose. (This is the same structural pattern formalized as the **Common-Ancestor Cancellation Benchmark**, Section 9.1.3 — that benchmark adds the specific cancellation-quantity assertion on top of this structural test.)
-    - **Adjoint/sensitivity primitive (relocated this revision):** finite-difference cross-check of `compute_sensitivity()` against numerically-perturbed nominal composition, for a representative chain — this is the same correctness gate previously specified inside `test_allocation.py` (Section 6.7), now run here since the primitive itself now lives here; `test_allocation.py` and the new `test_stats.py` Pareto tests (Section 6.8) both reuse this same validated primitive rather than re-deriving their own cross-check.
+14. ✅ **Done (A3, `d81645c`)** Write `tests/test_frame_graph.py` (24 tests):
+    - ✅ Cycle detection: `validate_dag()` raises with cycle path.
+    - ✅ Multiple-incoming-edge detection: `validate_dag()` raises and names the offending Frame.
+    - ✅ Root identification: multi-component graph returns both roots.
+    - ✅ Shared-frame (junction) case: `nominal_transform_between()` correctly composes through shared ancestor.
+    - ✅ Different-component case: `nominal_transform_between()` raises `DisjointFramesError` with exact locked message text (Section 2.3.1).
+    - ✅ Common-physical-base pattern: two independent roots connected via a shared `"base"` Frame; query between the two chains succeeds and propagates base-attachment tolerances. (Section 9.1.3 Common-Ancestor Cancellation Benchmark adds the MC cancellation-quantity assertion on top — that test is in B1-6.)
+    - ✅ **Adjoint/sensitivity FD cross-check:** `compute_sensitivity()` finite-difference cross-check (4 tests) — corrected formulas confirmed here before being depended upon by `sim/allocation.py` and `postprocess/stats.py`.
 
 **Interfaces:**
 
@@ -597,12 +597,12 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
       - Compute `nominal_poses[edge.child] = nominal_poses[edge.parent].matrix @ edge.nominal.matrix` (single 4x4, unperturbed reference).
    d. Return the populated `TrialData`.
 4. Performance check: confirm step 3c's batched composition is implemented via `np.einsum('nij,njk->nik', ...)` or equivalent broadcasted `@` — add a one-line comment/assertion in code (or a test) confirming no per-trial Python loop exists, since this is explicitly called out as a non-negotiable performance requirement (Section 5.1/2.5).
-5. Write `tests/test_monte_carlo_fk.py`:
-   - **2-edge chain hand-check:** build a simple 2-edge chain with known, simple tolerances; run with a small `n_trials`; manually verify a handful of individual trial outputs by hand-computing the expected perturbed compositions for the same sampled deltas (requires either fixing the seed and manually replicating the RNG draw, or temporarily monkey-patching the sampler to return known fixed deltas for the test — prefer the latter, it's more robust to incidental RNG implementation changes).
-   - **3-edge chain hand-check:** same approach, one more edge, to confirm composition order/chaining is correct beyond the trivial 2-edge case.
-   - **Shared-edge consistency test (Section 9, Item 3 — required):** build a graph with one shared upstream edge feeding two downstream branches; run the engine once; confirm that the *same* per-trial sampled perturbation was applied to the shared edge regardless of which downstream Frame's pose you inspect (this can be checked indirectly: compute the relative transform from the shared edge's parent to its child via both downstream paths' stored data and confirm they match the directly-stored `frame_poses` for the shared edge's child frame exactly, for every trial).
-   - **Reproducibility test:** run twice with the same `seed`, confirm bit-for-bit identical `TrialData`. Run twice with the same `seed` but one extra unrelated edge added elsewhere in the graph, confirm the pre-existing edges' samples are unchanged (this is the direct test of Step 1's "why this matters" claim).
-   - **Root-anchor test:** confirm a root Frame's `frame_poses` entry is exactly identity for every trial.
+5. ✅ **Done (A4, `744c562`)** Write `tests/test_monte_carlo_fk.py` (18 tests):
+   - ✅ **2-edge chain hand-check:** `TestTwoEdgeChainHandCheck` — uses `_FixedToleranceSpec6` duck-typed helper (more robust than seed-replication) to give exact deterministic deltas; checks `frame_poses["B"]` and `frame_poses["C"]` translation columns against hand-computed values.
+   - ✅ **3-edge chain hand-check:** `TestThreeEdgeChainHandCheck` — includes a π/4 nominal rotation on the middle edge, hand-computes expected D pose by matrix multiplication.
+   - ✅ **Shared-edge consistency test:** `TestSharedEdgeConsistency` — 3 tests covering leaf1==shared, leaf2==shared, and shared-poses-are-nontrivial. **Note:** Section 9 Item 3 also requires a standalone named module-level function, which was added in A6 as `test_shared_edge_sampling_consistency` in `tests/test_integration.py` (Section 6.20 Item 3).
+   - ✅ **Reproducibility test:** `TestReproducibility` — same seed gives bit-for-bit identical output; adding an unrelated disconnected edge doesn't change existing frames' draws.
+   - ✅ **Root-anchor test:** `TestRootAnchor` — root frame is identity every trial; multi-component both roots are identity.
 
 **Interfaces:**
 
@@ -701,10 +701,16 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Deliverables:**
 
-- Per-Frame envelope/percentile/histogram-data functions
-- Point-pair relative-pose statistics, exploiting the "absolute pose already stored" property (Section 6 top-level note)
-- `compute_tolerance_sensitivities()` — **new this revision (Mod 2):** Pareto-sorted percentage-contribution breakdown per edge/DoF, built on the shared `compute_sensitivity()` primitive relocated to `core/frame_graph.py` (Section 6.3)
-- `tests/test_stats.py` (new test file — not listed in the original Section 5.1 tree; add it), now including Pareto breakdown correctness tests
+**A5 scope (Steps 1–7) — ✅ Implemented (commit `019eb34`, 26 tests):**
+- Per-Frame envelope/percentile/histogram-data functions (`frame_envelope_box`, `frame_percentiles`, `frame_histogram_data`)
+- Point-pair relative-pose statistics: `relative_pose_trials`, `relative_pose_nominal`, `point_pair_envelope_box` — exploiting the "absolute pose already stored" property (Section 6 top-level note)
+- `pose_error_vector_batch()` — the shared extraction primitive producing `(N,6)` error vectors in `[dx,dy,dz,rx,ry,rz]` order with rotvec `ω=θu` rotation columns compatible with `postprocess/bounding_shapes.py`
+- `tests/test_stats.py` — 26 tests, including shared-ancestor cancellation integration check
+
+**B1-3 scope (Steps 8–9) — Deferred to Milestone B-1:**
+- `compute_tolerance_sensitivities()` — Pareto-sorted percentage-contribution breakdown per edge/DoF, built on the shared `compute_sensitivity()` primitive relocated to `core/frame_graph.py` (Section 6.3)
+- `ParetoSensitivityReport` dataclass + `to_ascii_chart()` rendering hook
+- Pareto breakdown correctness tests (to be added to `tests/test_stats.py` in B1-3)
 
 **Granular Task List:**
 
@@ -717,21 +723,21 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
    - Compute `inverse(trial_data.frame_poses[frame_a][i]) @ trial_data.frame_poses[frame_b][i]` for every trial `i`, vectorized (batched inverse + batched matmul, no Python loop).
 6. Implement `relative_pose_nominal(trial_data, frame_a, frame_b) -> np.ndarray` shape `(4,4)`: same as Step 5 but using `trial_data.nominal_poses`, for use as the reference point in error-vector extraction.
 7. Implement `point_pair_envelope_box(trial_data, frame_graph, frame_a, frame_b) -> dict`: combines Steps 1, 5, and 6 to produce the same kind of per-DoF min/max box as Step 2, but for the *relative* pose between two arbitrary Frames — this is the function that directly satisfies the cross-chain optical-alignment use case (Section 3.3).
-8. **New this revision (Mod 2, cross-review) — `compute_tolerance_sensitivities(frame_graph, frame_a, frame_b) -> ParetoSensitivityReport`:** computes the first-order percentage contribution of each toleranced edge/DoF on the path between `frame_a` and `frame_b` to the total variance of the target relative pose.
+8. **[DEFERRED TO B1-3] New this revision (Mod 2, cross-review) — `compute_tolerance_sensitivities(frame_graph, frame_a, frame_b) -> ParetoSensitivityReport`:** computes the first-order percentage contribution of each toleranced edge/DoF on the path between `frame_a` and `frame_b` to the total variance of the target relative pose.
    - Use `frame_graph.path_edges_between(frame_a, frame_b)` (Section 6.3, Step 12) to get the relevant edges, and `compute_sensitivity(frame_graph, frame_a, frame_b, edge_names)` (Section 6.3, Step 13) to get the shared `(6, 6*len(edges))` sensitivity matrix — **do not implement a second copy of the Jacobian here; this is the entire point of the Mod 2 relocation.**
    - For each edge's each DoF, compute its variance contribution as `(sensitivity_block_column)² * variance(DoF)`, where `variance(DoF)` is `bound²/3` for `"uniform"` tolerances and `sigma²` (`= (bound/sigma_level)²`) for `"normal"` tolerances — both reduce consistently to the same variance-propagation math, which is also what the RSS benchmark in Section 9.1 validates against.
    - Sum each edge/DoF's variance contribution across all 6 output DoF (weighted by which output DoF the user actually cares about, or summed unweighted across all 6 if no specific weighting is given — **decide and document the exact weighting scheme once this task is reached**), normalize by the total variance, and sort descending — this produces the Pareto breakdown.
    - Return a `ParetoSensitivityReport` dataclass: an ordered list of `(edge_name, dof_label, percentage_contribution)` tuples, plus the total variance they sum to, ready for direct display as the Pareto chart shown in Mod 2's example output (`Stage_X_Tilt (rx) 45.2%`, etc.) or for `postprocess/reporting.py` to render as a horizontal bar chart.
    - **Document explicitly, next to this function's docstring and in any rendered report:** this is a **first-order linear approximation** (the same small-angle adjoint Jacobian used by `sim/allocation.py`'s baseline allocation, Section 6.7). For chains with significant geometric leverage (`dx ≈ L·θ`, the same nonlinearity that motivates the allocation engine's damping loop), the true nonlinear variance contribution of a given edge can differ from this linear estimate — this caveat must not be silently omitted, since a Pareto chart that looks authoritative but is quietly approximate could mislead a sourcing decision (Section 1.4).
-9. Implement `ParetoSensitivityReport`'s rendering hook (a `to_ascii_chart()` or similar convenience method) that produces the bar-chart-style text output shown in Mod 2 — useful for quick terminal/script output in Milestone B-1's example scripts (Section 6.19) ahead of any GUI rendering.
-10. Write `tests/test_stats.py`:
-   - Construct a small synthetic `TrialData` with known, hand-computed pose errors (don't run the full MC engine — directly build the `TrialData` fields) and confirm `frame_envelope_box` returns the expected min/max.
-   - Confirm `relative_pose_trials` between a Frame and itself returns identity for every trial (trivial sanity check).
-   - Confirm `point_pair_envelope_box` between two Frames sharing a common upstream edge correctly reflects that the shared edge's contribution cancels out of the *relative* error (a key qualitative check that validates the whole point of Section 2.4's shared-sampling design — relative tolerance between two downstream points should be tighter than either point's absolute tolerance when they share a noisy common ancestor edge).
-   - Confirm the different-component case raises a clear error.
-   - **Pareto sensitivity correctness (new, Mod 2):** construct a simple chain with one dominant-tolerance edge and several much-tighter edges, confirm `compute_tolerance_sensitivities()` ranks the dominant edge first with a percentage contribution that matches a hand-computed variance ratio.
-   - **Pareto contributions sum to ~100%:** confirm the reported percentages across all edge/DoF entries sum to approximately 100% (allowing for the "Others" bucketing shown in Mod 2's example output, if implemented) for a representative chain.
-   - **Uniform vs. normal consistency:** confirm the variance formula (`bound²/3` for uniform, `sigma²` for normal) produces self-consistent Pareto rankings when the same chain is run once with all-uniform and once with all-normal tolerances at equivalent variance — this is the same consistency the RSS benchmark (Section 9.1) checks at the FK level, applied here at the sensitivity-breakdown level.
+9. **[DEFERRED TO B1-3]** Implement `ParetoSensitivityReport`'s rendering hook (a `to_ascii_chart()` or similar convenience method) that produces the bar-chart-style text output shown in Mod 2 — useful for quick terminal/script output in Milestone B-1's example scripts (Section 6.19) ahead of any GUI rendering.
+10. Write `tests/test_stats.py` — **A5 tests ✅ implemented (26 tests); B1-3 Pareto tests deferred:**
+   - ✅ Construct a small synthetic `TrialData` with known, hand-computed pose errors (don't run the full MC engine — directly build the `TrialData` fields) and confirm `frame_envelope_box` returns the expected min/max.
+   - ✅ Confirm `relative_pose_trials` between a Frame and itself returns identity for every trial (trivial sanity check).
+   - ✅ Confirm `point_pair_envelope_box` between two Frames sharing a common upstream edge correctly reflects that the shared edge's contribution cancels out of the *relative* error (a key qualitative check that validates the whole point of Section 2.4's shared-sampling design — relative tolerance between two downstream points should be tighter than either point's absolute tolerance when they share a noisy common ancestor edge).
+   - ✅ Confirm the different-component case raises a clear error.
+   - **[DEFERRED TO B1-3] Pareto sensitivity correctness (new, Mod 2):** construct a simple chain with one dominant-tolerance edge and several much-tighter edges, confirm `compute_tolerance_sensitivities()` ranks the dominant edge first with a percentage contribution that matches a hand-computed variance ratio.
+   - **[DEFERRED TO B1-3] Pareto contributions sum to ~100%:** confirm the reported percentages across all edge/DoF entries sum to approximately 100% (allowing for the "Others" bucketing shown in Mod 2's example output, if implemented) for a representative chain.
+   - **[DEFERRED TO B1-3] Uniform vs. normal consistency:** confirm the variance formula (`bound²/3` for uniform, `sigma²` for normal) produces self-consistent Pareto rankings when the same chain is run once with all-uniform and once with all-normal tolerances at equivalent variance — this is the same consistency the RSS benchmark (Section 9.1) checks at the FK level, applied here at the sensitivity-breakdown level.
 
 **Interfaces:**
 
@@ -1070,23 +1076,29 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 **Responsibility:** The full unit/integration test suite. Houses every hand-calculable validation case described per-module above, plus the dedicated cross-cutting regression tests called out in Section 9.
 
 **Deliverables (test files, consolidated from the per-module task lists above — listed here as the authoritative index):**
-- `test_transforms.py` (Section 6.1)
-- `test_tolerance.py` (Section 6.2, also covers `core/sampling.py` per Section 6.5)
-- `test_frame_graph.py` (Section 6.3)
-- `test_monte_carlo_fk.py` (Section 6.6)
-- `test_allocation.py` (Section 6.7)
-- `test_stats.py` (Section 6.8 — **new, not in the original Section 5.1 tree; add it**)
-- `test_bounding_shapes.py` (Section 6.9 — **new, add it**)
-- `test_reporting.py` (Section 6.10 — **new, add it; smoke tests only**)
-- `test_schema.py` (Section 6.11 — **new, add it**)
-- `test_serializer.py` (Section 6.12 — **new, add it**)
+
+**✅ Implemented (Milestone A):**
+- `conftest.py` — ✅ A6 (`83b8ee3`): `DEFAULT_ATOL=1e-9`, `SMALL_ANGLE_ATOL=1e-6`, fixtures `two_edge_chain` / `three_edge_chain` / `shared_frame_graph`, helpers `make_tol` / `make_zero_tol` / `make_htm`
+- `test_transforms.py` — ✅ A1 (`a31218e`): 26 tests covering `HTM` and `core/conversions.py`
+- `test_tolerance.py` — ✅ A2 (`3ac0eed`): 21 tests covering `ToleranceSpec6`, `apply_perturbation_batch`, `core/sampling.py`
+- `test_frame_graph.py` — ✅ A3 (`d81645c`): 24 tests covering `FrameGraph`, `adjoint()`, `compute_sensitivity()`
+- `test_monte_carlo_fk.py` — ✅ A4 (`744c562`): 18 tests covering `MonteCarloFKEngine`, `TrialData`, per-edge RNG
+- `test_stats.py` — ✅ A5 (`019eb34`): 26 tests covering Steps 1–7 of Section 6.8 (B1-3 Pareto tests to be added in Milestone B-1)
+- `test_integration.py` — ✅ A6 (`83b8ee3`): 15 end-to-end FK → stats tests; includes `test_shared_edge_sampling_consistency` (Section 9 Item 3 standalone named regression)
+- `test_allocation.py` — ✅ A6 placeholder (`83b8ee3`): `test_allocation_mc_validation_discrepancy` named and skipped per Section 9 Item 4 (to be implemented in B-2)
+
+**Pending (Milestone B-1):**
+- `test_bounding_shapes.py` (Section 6.9 — add when `postprocess/bounding_shapes.py` is implemented)
+- `test_reporting.py` (Section 6.10 — smoke tests only, add when `postprocess/reporting.py` is implemented)
+- `test_schema.py` (Section 6.11 — add when `io/schema.py` is implemented)
+- `test_serializer.py` (Section 6.12 — add when `io/serializer.py` is implemented)
 
 **Granular Task List (cross-cutting, beyond what's already specified per-module above):**
-1. Set up `pytest` configuration (`pytest.ini` or `pyproject.toml` section) with a shared `conftest.py` providing reusable fixtures: a few representative small `FrameGraph` instances (2-edge chain, 3-edge chain, shared-frame multi-chain graph) so individual test files don't each re-build their own from scratch.
-2. Establish and document a single shared numerical tolerance convention for floating-point assertions across the whole suite (e.g., a `conftest.py`-level constant `DEFAULT_ATOL = 1e-9` for exact/near-exact checks and a separate, looser `SMALL_ANGLE_ATOL` for checks that are expected to carry small-angle-approximation residual error) — prevents each test file from inventing its own ad hoc tolerance values.
-3. Implement the dedicated Monte-Carlo-shared-edge-consistency regression test (Section 9, Item 3) as its own clearly-named test function, not buried inside a more general `test_monte_carlo_fk.py` test — it should be findable by name (e.g., `test_shared_edge_sampling_consistency`) given how architecturally important this property is.
-4. Implement the dedicated allocation MC-validation-discrepancy test (Section 9, Item 4) similarly, as its own clearly-named function in `test_allocation.py`.
-5. Add a CI-friendly entry point (a simple `pytest` invocation documented in the repo `README.md`) so the full suite can be run with one command at the start of every work session — this is the practical mechanism that actually enforces Section 10's "engine must be proven before GUI work begins" rule.
+1. ✅ **Done (A6, `83b8ee3`)** Set up `pytest` configuration with a shared `conftest.py` providing reusable fixtures: `two_edge_chain` (root→B→C, 5 mm + 10 mm translation nominals), `three_edge_chain` (Rz=π/4 + 50 mm + zero-tol), `shared_frame_graph` (shared-base multi-branch). No `pytest.ini` was needed — auto-discovery works from the project root. Module-level helpers `make_tol` / `make_zero_tol` / `make_htm` duplicated inline in `test_integration.py` rather than imported from conftest (conftest.py is not directly importable as a Python module in pytest's default discovery mode without additional path config).
+2. ✅ **Done (A6, `83b8ee3`)** `DEFAULT_ATOL = 1e-9` and `SMALL_ANGLE_ATOL = 1e-6` defined in `conftest.py` and mirrored in `test_integration.py`. Convention: `DEFAULT_ATOL` for near-exact floating-point composition (no trig residual); `SMALL_ANGLE_ATOL` for checks where `sin(δθ) vs δθ` at ~1 mrad introduces ~1.7e-10 second-order residual.
+3. ✅ **Done (A6, `83b8ee3`)** `test_shared_edge_sampling_consistency` implemented as a module-level function in `tests/test_integration.py` (not inside any class), findable by `pytest -k test_shared_edge_sampling_consistency`. Complementary class-based coverage exists in `test_monte_carlo_fk.py::TestSharedEdgeConsistency`, but the required standalone named function is in `test_integration.py` per this spec requirement.
+4. ✅ **Done (A6, `83b8ee3` — placeholder)** `test_allocation_mc_validation_discrepancy` in `tests/test_allocation.py` as a `@pytest.mark.skip(reason="sim/allocation.py not yet implemented — Milestone B-2 task")` module-level function. Real implementation pending B-2.
+5. ✅ **Done (A6, `83b8ee3`)** `README.md` "Running Tests" section: `source .venv/bin/activate && python -m pytest tests/ -q`. Notes that all tests must pass before GUI work begins (Section 10 rule).
 
 **Interfaces:**
 
