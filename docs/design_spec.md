@@ -52,6 +52,18 @@ To keep scope sane and prevent feature creep, the following are **intentionally 
 
 A mechanical/systems/optical engineer who needs to rapidly answer: *"If I tolerance each interface in my assembly to X, what is the resulting positional/angular uncertainty at the point I care about? Or, conversely, if I need the final uncertainty to be Y, how tight do my interface tolerances need to be?"* This is currently done ad hoc in spreadsheets; TolTransform aims to make it fast, repeatable, visual, and statistically rigorous (offering both worst-case and statistical answers side by side).
 
+## 1.4 Core Engineering Decisions Enabled
+
+*(Added 2026-06-23 — Project Owner, per cross-review. The point of this section is to make the software's purpose unmistakable by naming the actual engineering decisions it exists to support, not just describing its mechanics.)*
+
+TolTransform exists to let an engineer answer questions like these quickly, with a defensible number behind the answer rather than a gut call:
+
+- **Component Selection & Sourcing:** *"Can we use a cheaper ±50 μm linear stage for the coarse alignment axis, or does our error budget demand a ±10 μm stage?"* — a direct application of Mode 1 (forward verification, Section 3.1): swap the candidate stage's tolerance into the relevant edge, re-run, and check whether the resulting envelope at the point of interest still meets spec.
+- **Sensitivity Pinpointing:** *"Which specific angular or translational tolerance edge is the dominant driver of our end-of-arm volumetric error?"* — the direct motivation for the Pareto sensitivity breakdown added this revision (Section 6.8, Mod 2 below): an engineer should be able to point at one number and say "that joint's tilt tolerance is responsible for 45% of our total budget," not just see an aggregate envelope with no attribution.
+- **Mitigation Verification:** *"If we spend money to ground our independent metrology rail directly to a shared optical base plate, how much absolute error cancellation do we achieve at our sensor plane?"* — a direct application of the point-pair / shared-ancestor analysis (Section 2.4, Section 3.3, and the Common-Ancestor Cancellation Benchmark in Section 9.1): model the proposed shared base plate as a junction Frame, run the relative-pose query between the two components, and see the cancellation effect quantified before spending the money.
+
+Every module spec in Section 6 should trace back to enabling one of these three categories of decision — if a proposed feature doesn't serve component selection, sensitivity pinpointing, or mitigation verification, it's worth asking whether it belongs in the tool at all (per Section 1.2's scope discipline).
+
 ---
 
 # 2. Core Engineering & Mathematical Conventions
@@ -409,7 +421,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.3 `core/frame_graph.py`
 
-*(Last revised: 2026-06-23 — Claude, design-spec update per cross-review of disjoint-component handling)*
+*(Last revised: 2026-06-23 — Claude, design-spec update per cross-review of disjoint-component handling; further revised same day to relocate `adjoint()`/`compute_sensitivity()` here per Mod 2)*
 
 **Responsibility:** Defines `Frame`, `HTMEdge`, and `FrameGraph` — the NetworkX-backed directed graph that is the canonical topological model of the entire system, including DAG validation, root identification, and relative-transform queries between arbitrary Frames.
 
@@ -418,7 +430,8 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - `Frame`, `HTMEdge` data structures
 - `FrameGraph` wrapping a NetworkX `DiGraph`, with build, validation, and query methods
 - Clear, actionable validation errors (cycles, multiple-incoming-edges, disconnected references)
-- `tests/test_frame_graph.py` covering validation and relative-transform queries, including multi-component (multi-chain) cases
+- `adjoint(T: HTM) -> np.ndarray` and `compute_sensitivity(frame_graph, frame_a, frame_b, edge_names) -> np.ndarray` — **relocated here this revision** (see Step 13) as the single, shared small-angle sensitivity primitive used by both `postprocess/stats.py`'s Pareto sensitivity breakdown and `sim/allocation.py`'s inverse allocator
+- `tests/test_frame_graph.py` covering validation and relative-transform queries, including multi-component (multi-chain) cases, plus the relocated sensitivity primitive's correctness
 
 **Granular Task List:**
 
@@ -444,18 +457,23 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
       ```
     - This message must be raised at this layer (not left to bubble up as a raw NetworkX `NetworkXNoPath` exception) — wrap the underlying graph-traversal failure explicitly. **Do not auto-connect the components under any circumstance** (Section 2.3.1) — this error is the intended, correct behavior, not a defect to be silently engineered around.
 11. Implement `FrameGraph.all_edges() -> list[HTMEdge]` and `FrameGraph.all_frames() -> list[Frame]` (simple accessors, needed by the simulation engines to iterate).
-12. Write `tests/test_frame_graph.py`:
+12. Implement `FrameGraph.path_edges_between(frame_a, frame_b) -> list[HTMEdge]`: returns the ordered list of edges on the unique path between two Frames in the same component (the edge-level counterpart to `nominal_transform_between()`, Step 10) — this is what both Step 13's sensitivity computation and `sim/allocation.py`'s allocator need to know *which* edges to differentiate with respect to, not just the composed nominal transform between the two endpoints.
+13. **Relocated this revision (Mod 2, cross-review):** Implement the shared small-angle sensitivity primitives here, in `core/frame_graph.py`, rather than in `sim/allocation.py` where they originally lived. **Rationale:** both `postprocess/stats.py`'s new Pareto sensitivity breakdown (Section 6.8) and `sim/allocation.py`'s inverse allocator (Section 6.7) need the identical adjoint-transform sensitivity computation; keeping one implementation in `core/frame_graph.py` (a pure function of chain geometry, depending on neither the forward-stats nor inverse-allocation use case) prevents the two call sites from holding two independent copies of the same math that could silently drift apart.
+    - Implement `adjoint(T: HTM) -> np.ndarray` shape `(6,6)`: the standard small-angle adjoint transformation block matrix (`[[R, 0],[skew(t)@R, R]]` or the equivalent convention), confirmed to match the local-frame right-multiply perturbation convention from Section 2.2.2 exactly — the adjoint convention must agree with the perturbation convention or any downstream sensitivity computation is silently wrong.
+    - Implement `compute_sensitivity(frame_graph, frame_a, frame_b, edge_names: list[str]) -> np.ndarray` shape `(6, 6*len(edge_names))`: for each named edge on the path between `frame_a` and `frame_b` (typically the full `path_edges_between()` result, or a caller-supplied subset), compute its 6x6 sensitivity block via the adjoint of the nominal transform from that edge's child Frame to `frame_b`, per the manipulator-Jacobian-style construction. This function makes no assumption about *why* the caller wants the sensitivity — it is equally valid input to a Pareto variance breakdown (Section 6.8) or an inverse allocation solve (Section 6.7).
+14. Write `tests/test_frame_graph.py`:
     - Cycle detection: build a graph with an intentional cycle, confirm `validate_dag()` raises and correctly reports the cycle path.
     - Multiple-incoming-edge detection: build a graph where one Frame has two parents, confirm `validate_dag()` raises and names the Frame.
     - Root identification: multi-component graph (two unrelated chains, no shared Frame) — confirm `root_frames()` returns both roots correctly.
     - Shared-frame (junction) case: two chains sharing a common upstream Frame — confirm `nominal_transform_between()` correctly composes through the shared ancestor for Frames on different downstream branches.
     - Different-component case: confirm `nominal_transform_between()` raises `DisjointFramesError` with the exact locked message text (Section 2.3.1), naming both Frames — not a generic NetworkX exception.
-    - Common-physical-base pattern (Section 2.3.1): build two independently-rooted chains, explicitly connect both roots to a shared `"base"` Frame via real edges (one zero-tolerance, one with a nonzero tolerance), confirm `nominal_transform_between()` now succeeds between Frames on the two different chains and correctly propagates the base-attachment edges' tolerances into the result — this is the regression test proving the documented workaround in Section 2.3.1 actually works end-to-end, not just in the documentation's prose.
+    - Common-physical-base pattern (Section 2.3.1): build two independently-rooted chains, explicitly connect both roots to a shared `"base"` Frame via real edges (one zero-tolerance, one with a nonzero tolerance), confirm `nominal_transform_between()` now succeeds between Frames on the two different chains and correctly propagates the base-attachment edges' tolerances into the result — this is the regression test proving the documented workaround in Section 2.3.1 actually works end-to-end, not just in the documentation's prose. (This is the same structural pattern formalized as the **Common-Ancestor Cancellation Benchmark**, Section 9.1.3 — that benchmark adds the specific cancellation-quantity assertion on top of this structural test.)
+    - **Adjoint/sensitivity primitive (relocated this revision):** finite-difference cross-check of `compute_sensitivity()` against numerically-perturbed nominal composition, for a representative chain — this is the same correctness gate previously specified inside `test_allocation.py` (Section 6.7), now run here since the primitive itself now lives here; `test_allocation.py` and the new `test_stats.py` Pareto tests (Section 6.8) both reuse this same validated primitive rather than re-deriving their own cross-check.
 
 **Interfaces:**
 
 - *Depends on:* `core/transforms.py` (`HTM`), `core/tolerance.py` (`ToleranceSpec6`), `networkx`.
-- *Used by:* `sim/monte_carlo_fk.py` (consumes `topological_edge_order()`, `all_edges()`, `root_frames()`), `sim/allocation.py` (consumes `nominal_transform_between()` for sensitivity computation), `postprocess/stats.py` (consumes `weakly_connected_components()` to validate point-pair queries), `io/schema.py` (constructs a `FrameGraph` from a loaded `Project`), eventually `gui/graph_editor/`.
+- *Used by:* `sim/monte_carlo_fk.py` (consumes `topological_edge_order()`, `all_edges()`, `root_frames()`), `sim/allocation.py` (consumes `path_edges_between()`, `adjoint()`, and `compute_sensitivity()` for its inverse solve, per the Mod 2 relocation), `postprocess/stats.py` (consumes `weakly_connected_components()` to validate point-pair queries, **and now also `path_edges_between()`/`compute_sensitivity()` for the Pareto sensitivity breakdown, per Mod 2**), `io/schema.py` (constructs a `FrameGraph` from a loaded `Project`), eventually `gui/graph_editor/`.
 - *Public API (conceptual):*
   ```
   FrameGraph.add_frame(name, metadata=None)
@@ -465,8 +483,11 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
   FrameGraph.weakly_connected_components() -> list[set[str]]
   FrameGraph.topological_edge_order() -> list[str]
   FrameGraph.nominal_transform_between(frame_a, frame_b) -> HTM
+  FrameGraph.path_edges_between(frame_a, frame_b) -> list[HTMEdge]
   FrameGraph.all_edges() -> list[HTMEdge]
   FrameGraph.all_frames() -> list[Frame]
+  adjoint(T: HTM) -> np.ndarray (6,6)                                          # relocated from sim/allocation.py
+  compute_sensitivity(frame_graph, frame_a, frame_b, edge_names) -> np.ndarray  # relocated from sim/allocation.py
   ```
 
 ---
@@ -593,29 +614,27 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.7 `sim/allocation.py`
 
-*(Last revised: 2026-06-23 — Claude, design-spec update adding the iterative nonlinear damping loop per cross-review)*
+*(Last revised: 2026-06-23 — Claude, design-spec update adding the iterative nonlinear damping loop per cross-review; further revised same day to remove the now-relocated `adjoint()`/`compute_sensitivity()` implementation per Mod 2 — see Section 6.3)*
 
-**Responsibility:** The inverse tolerance allocation engine (Mode 2, Section 3.2): computes sensitivity, solves the equal-allocation objective, and validates the proposed tolerance set via Monte Carlo.
+**Responsibility:** The inverse tolerance allocation engine (Mode 2, Section 3.2): consumes the shared sensitivity primitive from `core/frame_graph.py` (Section 6.3) to solve the equal-allocation objective, then validates and iteratively corrects the proposed tolerance set via Monte Carlo.
 
 **Deliverables:**
 
-- Analytical (closed-form, adjoint-based) Jacobian/sensitivity computation — locked decision this session
-- `AllocationObjective` interface + `EqualAllocation` implementation, producing the **baseline linear allocation**
+- `AllocationObjective` interface + `EqualAllocation` implementation, producing the **baseline linear allocation** (built on top of `core/frame_graph.py`'s relocated `compute_sensitivity()` — this module implements no Jacobian math of its own)
 - `AllocationEngine.allocate(...)` — the top-level entry point, wrapping the baseline linear solve in an **iterative nonlinear damping/correction loop** (locked decision, this revision — see Step 5 below)
 - `AllocationEngine.solve(...)` (baseline linear step) and `.validate(...)` (single MC validation pass), both retained as the internal building blocks `allocate()` composes
 - `AllocationResult` output structure explicitly preserving **both** the uncorrected linear baseline and the final nonlinearly-corrected allocation, plus convergence status
-- `tests/test_allocation.py`, including a finite-difference cross-check of the analytical Jacobian (used only as a test oracle, never in production code) and dedicated tests for the damping loop's convergence and non-convergence paths
+- `tests/test_allocation.py`, covering allocation-specific behavior (the Jacobian's own correctness is now tested in `tests/test_frame_graph.py`, Section 6.3) and dedicated tests for the damping loop's convergence and non-convergence paths
 
 **Granular Task List:**
 
-1. **Sensitivity derivation (analytical/closed-form — locked decision):** For a path of edges from `frame_a` to `frame_b`, derive the sensitivity of the relative-pose 6-vector error at `frame_b` (relative to `frame_a`) with respect to a small local perturbation `delta_k` on free edge `k` along that path. Under the small-angle approximation, this is the standard adjoint-transformed unit-twist construction used in manipulator Jacobians: a perturbation on edge `k` propagates to `frame_b` via the adjoint transformation of the nominal transform from edge `k`'s child frame to `frame_b`. Implement this as `compute_sensitivity(frame_graph, frame_a, frame_b, free_edge_names) -> np.ndarray` shape `(6, 6*len(free_edge_names))` (one 6x6 block per free edge).
-   - Sub-task: implement the 6x6 `adjoint(T: HTM) -> np.ndarray` helper (block matrix `[[R, 0],[skew(t)@R, R]]` or the standard equivalent — confirm exact convention against the local-frame right-multiply perturbation convention from Section 2.2.2 before finalizing, since adjoint convention must match the perturbation convention exactly or the sensitivity will be silently wrong).
+1. **Sensitivity derivation — relocated this revision (Mod 2, cross-review):** `compute_sensitivity()` and its underlying `adjoint()` helper now live in `core/frame_graph.py` (Section 6.3, Step 13), not here — both `sim/allocation.py` and `postprocess/stats.py`'s new Pareto sensitivity breakdown (Section 6.8) call the same shared primitive, so the math is implemented exactly once. This module's job is to call `frame_graph.path_edges_between(frame_a, frame_b)` to get the relevant edges, then `compute_sensitivity(frame_graph, frame_a, frame_b, free_edge_names)` to get the `(6, 6*len(free_edge_names))` sensitivity matrix used by `EqualAllocation.solve()` (Step 3) — do not re-implement the adjoint transform here.
 2. Implement the `AllocationObjective` abstract interface: a `solve(sensitivity_matrix, target_bound_vector, free_edge_names) -> dict[edge_name, ToleranceSpec6]` method signature, to allow future objectives beyond v1's `EqualAllocation` without changing the calling code in `AllocationEngine`.
-3. Implement `EqualAllocation(AllocationObjective)`: solves for a single uniform scale factor `s` applied to all free edges' (currently-unset or placeholder) per-DoF bounds such that the linear worst-case sum of contributions (via the sensitivity matrix from Step 1) equals the target bound, per DoF. This reduces to a simple linear equation per target DoF (closed-form, no iterative optimizer needed for v1) — document the exact formula once derived, including how multiple target DoF constraints are reconciled into a single scale factor (e.g., take the most restrictive/binding DoF, or solve a small least-squares system — **decide and document explicitly once this task is reached; flag as an open implementation decision for the Milestone B session that builds this module**).
+3. Implement `EqualAllocation(AllocationObjective)`: solves for a single uniform scale factor `s` applied to all free edges' (currently-unset or placeholder) per-DoF bounds such that the linear worst-case sum of contributions (via the sensitivity matrix from Step 1) equals the target bound, per DoF. This reduces to a simple linear equation per target DoF (closed-form, no iterative optimizer needed for v1) — document the exact formula once derived, including how multiple target DoF constraints are reconciled into a single scale factor (e.g., take the most restrictive/binding DoF, or solve a small least-squares system — **decide and document explicitly once this task is reached; flag as an open implementation decision for the Milestone B-2 session that builds this module**).
 4. Implement `AllocationEngine.solve(frame_graph, frame_a, frame_b, target_tolerance: ToleranceSpec6, objective=EqualAllocation()) -> dict[edge_name, ToleranceSpec6]`:
-   - Identify all edges on the path between `frame_a` and `frame_b` (via `frame_graph.nominal_transform_between`'s underlying path logic — may require adding a `path_edges_between()` accessor to `FrameGraph`, Section 6.3, if not already present from that module's build).
+   - Identify all edges on the path between `frame_a` and `frame_b` via `frame_graph.path_edges_between(frame_a, frame_b)` (Section 6.3, Step 12).
    - Partition into free (unlocked) and locked edges.
-   - Compute locked edges' fixed contribution to the budget (their existing `ToleranceSpec6` propagated through the same sensitivity machinery).
+   - Compute locked edges' fixed contribution to the budget (their existing `ToleranceSpec6` propagated through the same `compute_sensitivity()` primitive, Section 6.3).
    - Call `objective.solve(...)` on the remaining free-edge budget.
    - Return the full proposed per-edge `ToleranceSpec6` set (locked edges unchanged, free edges populated per the objective's solution).
 5. **Iterative nonlinear damping/correction loop (locked decision, this revision):** Long serial chains with high-leverage joints exhibit meaningful geometric cross-coupling (`dx ≈ L·θ` — a small angular tolerance on an upstream joint sweeps a large positional arc by the time it reaches a distant downstream Frame). The closed-form linear allocation from Steps 1–4 does not account for this, and can produce an allocation that passes the linear sensitivity math but fails nonlinear Monte Carlo validation. `AllocationEngine.allocate()` is the top-level method that wraps `solve()` and `validate()` in a correction loop to address this:
@@ -641,7 +660,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
    - Compute the achieved relative-pose envelope between `frame_a` and `frame_b` from the resulting `TrialData` (via `postprocess/stats.py`, Section 6.8).
    - Compare achieved vs. target per DoF; populate a `ValidationReport` with both values and the discrepancy (absolute and percentage), and a per-DoF pass/fail flag (consumed directly by Step 5's loop termination check).
 7. Write `tests/test_allocation.py`:
-   - **Finite-difference cross-check:** for a representative chain, numerically perturb each free edge's DoF by a small known amount, re-run nominal composition (not the full MC engine — just deterministic composition), and confirm the resulting numerical sensitivity matches the analytical `compute_sensitivity()` output to within a documented numerical tolerance. This is the primary correctness gate on the Jacobian and must pass before the allocation engine is considered trustworthy.
+   - **Sensitivity primitive correctness:** not re-derived here — `compute_sensitivity()`'s finite-difference cross-check now lives in `tests/test_frame_graph.py` (Section 6.3, Step 14), since the primitive itself was relocated there this revision. This module's tests assume that primitive is already validated and focus on allocation-specific behavior below.
    - **Equal-allocation sanity check:** simple 2–3 edge chain, all free, confirm the solved baseline tolerances are indeed equal (or equally scaled) across edges per the objective's definition.
    - **Locked-edge case:** one edge locked to a known value, confirm the solver only adjusts the free edges and correctly accounts for the locked edge's fixed contribution.
    - **All-edges-locked edge case:** confirm the solver detects an infeasible/over-constrained situation (no free edges to solve for) and raises a clear, specific error rather than silently returning a meaningless result.
@@ -651,12 +670,10 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Interfaces:**
 
-- *Depends on:* `core/frame_graph.py` (`FrameGraph`, path/edge access), `core/tolerance.py` (`ToleranceSpec6`), `core/transforms.py` (`HTM`, adjoint computation), `sim/monte_carlo_fk.py` (`MonteCarloFKEngine`, for the validation pass — called once per damping-loop iteration, up to `max_iter` times), `postprocess/stats.py` (envelope computation for validation), `scipy.optimize` (reserved for future non-closed-form objectives — not required for v1's `EqualAllocation`).
-- *Used by:* eventually `gui/run_panel/` and `gui/results_viewer/` (Milestone B) — the GUI's "Run" action for IK mode calls `allocate()`, not `solve()` directly, so the damping correction is always applied by default.
+- *Depends on:* `core/frame_graph.py` (`FrameGraph`, `path_edges_between()`, `adjoint()`, `compute_sensitivity()` — relocated here per Mod 2), `core/tolerance.py` (`ToleranceSpec6`), `core/transforms.py` (`HTM`), `sim/monte_carlo_fk.py` (`MonteCarloFKEngine`, for the validation pass — called once per damping-loop iteration, up to `max_iter` times), `postprocess/stats.py` (envelope computation for validation), `scipy.optimize` (reserved for future non-closed-form objectives — not required for v1's `EqualAllocation`).
+- *Used by:* eventually `gui/run_panel/` and `gui/results_viewer/` (Milestone B-2) — the GUI's "Run" action for IK mode calls `allocate()`, not `solve()` directly, so the damping correction is always applied by default.
 - *Public API (conceptual):*
   ```
-  adjoint(T: HTM) -> np.ndarray (6,6)
-  compute_sensitivity(frame_graph, frame_a, frame_b, free_edge_names) -> np.ndarray
   AllocationObjective.solve(sensitivity_matrix, target_bound_vector, free_edge_names) -> dict
   EqualAllocation(AllocationObjective)
   AllocationEngine.solve(frame_graph, frame_a, frame_b, target_tolerance, objective) -> dict[str, ToleranceSpec6]
@@ -665,21 +682,24 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
                              n_validate=1000, gamma=0.9, max_iter=10, seed=...) -> AllocationResult
   AllocationResult(baseline_linear_allocation, corrected_allocation, converged, iterations_used,
                     status_message, final_validation_report)
+  # Note: adjoint() and compute_sensitivity() are NOT part of this module's API —
+  # they live in core/frame_graph.py (Section 6.3) and are imported from there.
   ```
 
 ---
 
 ## 6.8 `postprocess/stats.py`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+*(Last revised: 2026-06-23 — Claude, design-spec update adding the Pareto sensitivity breakdown per Mod 2, cross-review)*
 
-**Responsibility:** Computes envelope statistics for any single Frame, and for the relative pose between any two Frames in the same component, directly from a `TrialData` instance — no re-simulation, no graph traversal beyond a same-component validation check.
+**Responsibility:** Computes envelope statistics for any single Frame, and for the relative pose between any two Frames in the same component, directly from a `TrialData` instance — no re-simulation, no graph traversal beyond a same-component validation check. **As of this revision, also computes the Pareto-sorted per-edge sensitivity breakdown** (Mod 2) — answering "which tolerance edge dominates this error budget" as a standalone forward-analysis capability, independent of whether inverse allocation is ever run.
 
 **Deliverables:**
 
 - Per-Frame envelope/percentile/histogram-data functions
 - Point-pair relative-pose statistics, exploiting the "absolute pose already stored" property (Section 6 top-level note)
-- `tests/test_stats.py` (new test file — not listed in the original Section 5.1 tree; add it)
+- `compute_tolerance_sensitivities()` — **new this revision (Mod 2):** Pareto-sorted percentage-contribution breakdown per edge/DoF, built on the shared `compute_sensitivity()` primitive relocated to `core/frame_graph.py` (Section 6.3)
+- `tests/test_stats.py` (new test file — not listed in the original Section 5.1 tree; add it), now including Pareto breakdown correctness tests
 
 **Granular Task List:**
 
@@ -692,16 +712,26 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
    - Compute `inverse(trial_data.frame_poses[frame_a][i]) @ trial_data.frame_poses[frame_b][i]` for every trial `i`, vectorized (batched inverse + batched matmul, no Python loop).
 6. Implement `relative_pose_nominal(trial_data, frame_a, frame_b) -> np.ndarray` shape `(4,4)`: same as Step 5 but using `trial_data.nominal_poses`, for use as the reference point in error-vector extraction.
 7. Implement `point_pair_envelope_box(trial_data, frame_graph, frame_a, frame_b) -> dict`: combines Steps 1, 5, and 6 to produce the same kind of per-DoF min/max box as Step 2, but for the *relative* pose between two arbitrary Frames — this is the function that directly satisfies the cross-chain optical-alignment use case (Section 3.3).
-8. Write `tests/test_stats.py`:
+8. **New this revision (Mod 2, cross-review) — `compute_tolerance_sensitivities(frame_graph, frame_a, frame_b) -> ParetoSensitivityReport`:** computes the first-order percentage contribution of each toleranced edge/DoF on the path between `frame_a` and `frame_b` to the total variance of the target relative pose.
+   - Use `frame_graph.path_edges_between(frame_a, frame_b)` (Section 6.3, Step 12) to get the relevant edges, and `compute_sensitivity(frame_graph, frame_a, frame_b, edge_names)` (Section 6.3, Step 13) to get the shared `(6, 6*len(edges))` sensitivity matrix — **do not implement a second copy of the Jacobian here; this is the entire point of the Mod 2 relocation.**
+   - For each edge's each DoF, compute its variance contribution as `(sensitivity_block_column)² * variance(DoF)`, where `variance(DoF)` is `bound²/3` for `"uniform"` tolerances and `sigma²` (`= (bound/sigma_level)²`) for `"normal"` tolerances — both reduce consistently to the same variance-propagation math, which is also what the RSS benchmark in Section 9.1 validates against.
+   - Sum each edge/DoF's variance contribution across all 6 output DoF (weighted by which output DoF the user actually cares about, or summed unweighted across all 6 if no specific weighting is given — **decide and document the exact weighting scheme once this task is reached**), normalize by the total variance, and sort descending — this produces the Pareto breakdown.
+   - Return a `ParetoSensitivityReport` dataclass: an ordered list of `(edge_name, dof_label, percentage_contribution)` tuples, plus the total variance they sum to, ready for direct display as the Pareto chart shown in Mod 2's example output (`Stage_X_Tilt (rx) 45.2%`, etc.) or for `postprocess/reporting.py` to render as a horizontal bar chart.
+   - **Document explicitly, next to this function's docstring and in any rendered report:** this is a **first-order linear approximation** (the same small-angle adjoint Jacobian used by `sim/allocation.py`'s baseline allocation, Section 6.7). For chains with significant geometric leverage (`dx ≈ L·θ`, the same nonlinearity that motivates the allocation engine's damping loop), the true nonlinear variance contribution of a given edge can differ from this linear estimate — this caveat must not be silently omitted, since a Pareto chart that looks authoritative but is quietly approximate could mislead a sourcing decision (Section 1.4).
+9. Implement `ParetoSensitivityReport`'s rendering hook (a `to_ascii_chart()` or similar convenience method) that produces the bar-chart-style text output shown in Mod 2 — useful for quick terminal/script output in Milestone B-1's example scripts (Section 6.19) ahead of any GUI rendering.
+10. Write `tests/test_stats.py`:
    - Construct a small synthetic `TrialData` with known, hand-computed pose errors (don't run the full MC engine — directly build the `TrialData` fields) and confirm `frame_envelope_box` returns the expected min/max.
    - Confirm `relative_pose_trials` between a Frame and itself returns identity for every trial (trivial sanity check).
    - Confirm `point_pair_envelope_box` between two Frames sharing a common upstream edge correctly reflects that the shared edge's contribution cancels out of the *relative* error (a key qualitative check that validates the whole point of Section 2.4's shared-sampling design — relative tolerance between two downstream points should be tighter than either point's absolute tolerance when they share a noisy common ancestor edge).
    - Confirm the different-component case raises a clear error.
+   - **Pareto sensitivity correctness (new, Mod 2):** construct a simple chain with one dominant-tolerance edge and several much-tighter edges, confirm `compute_tolerance_sensitivities()` ranks the dominant edge first with a percentage contribution that matches a hand-computed variance ratio.
+   - **Pareto contributions sum to ~100%:** confirm the reported percentages across all edge/DoF entries sum to approximately 100% (allowing for the "Others" bucketing shown in Mod 2's example output, if implemented) for a representative chain.
+   - **Uniform vs. normal consistency:** confirm the variance formula (`bound²/3` for uniform, `sigma²` for normal) produces self-consistent Pareto rankings when the same chain is run once with all-uniform and once with all-normal tolerances at equivalent variance — this is the same consistency the RSS benchmark (Section 9.1) checks at the FK level, applied here at the sensitivity-breakdown level.
 
 **Interfaces:**
 
-- *Depends on:* `sim/monte_carlo_fk.py` (`TrialData`), `core/frame_graph.py` (`FrameGraph`, for same-component validation only), `numpy`, `scipy.spatial.transform` (if used for rotation error extraction per Step 1).
-- *Used by:* `postprocess/bounding_shapes.py` (consumes the error vectors/point clouds this module produces), `postprocess/reporting.py` (consumes histogram data and envelope boxes for plotting), `sim/allocation.py` (consumes `point_pair_envelope_box` during the MC validation pass), eventually `gui/results_viewer/` and `gui/point_pair_panel/`.
+- *Depends on:* `sim/monte_carlo_fk.py` (`TrialData`), `core/frame_graph.py` (`FrameGraph`, for same-component validation, and **as of this revision** `path_edges_between()`/`compute_sensitivity()` for the Pareto breakdown — Mod 2), `core/tolerance.py` (`ToleranceSpec6`, to read each edge's distribution/bound/sigma_level for the variance calculation in Step 8), `numpy`, `scipy.spatial.transform` (if used for rotation error extraction per Step 1).
+- *Used by:* `postprocess/bounding_shapes.py` (consumes the error vectors/point clouds this module produces), `postprocess/reporting.py` (consumes histogram data, envelope boxes, **and now the `ParetoSensitivityReport`** for plotting/rendering), `sim/allocation.py` (consumes `point_pair_envelope_box` during the MC validation pass), eventually `gui/results_viewer/` and `gui/point_pair_panel/`.
 - *Public API (conceptual):*
   ```
   pose_error_vector_batch(poses, nominal) -> np.ndarray (N,6)
@@ -710,6 +740,9 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
   frame_histogram_data(trial_data, frame_name, dof_index, bins) -> (counts, edges)
   relative_pose_trials(trial_data, frame_graph, frame_a, frame_b) -> np.ndarray (N,4,4)
   point_pair_envelope_box(trial_data, frame_graph, frame_a, frame_b) -> dict
+  compute_tolerance_sensitivities(frame_graph, frame_a, frame_b) -> ParetoSensitivityReport   # new, Mod 2
+  ParetoSensitivityReport(ranked_contributions: list[tuple[str, str, float]], total_variance: float)
+  ParetoSensitivityReport.to_ascii_chart() -> str
   ```
 
 ---
@@ -761,15 +794,16 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.10 `postprocess/reporting.py`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+*(Last revised: 2026-06-23 — Claude, design-spec update adding Pareto sensitivity chart rendering per Mod 2, cross-review)*
 
-**Responsibility:** Generates Matplotlib plots from the statistics (`postprocess/stats.py`) and fitted shapes (`postprocess/bounding_shapes.py`): per-DoF histograms and 2D projections of bounding shapes, per the locked decision to use 2D projections rather than a rotatable 3D viewer (Section 8).
+**Responsibility:** Generates Matplotlib plots from the statistics (`postprocess/stats.py`) and fitted shapes (`postprocess/bounding_shapes.py`): per-DoF histograms, 2D projections of bounding shapes, and **as of this revision, the Pareto sensitivity breakdown chart** (Mod 2), per the locked decision to use 2D projections rather than a rotatable 3D viewer (Section 8).
 
 **Deliverables:**
 
 - Per-DoF histogram plotting function
 - 2D projection plotting for translation bounding shapes (XY/XZ/YZ)
 - 2D plotting for rotation bounding box/cone representations
+- Pareto sensitivity bar chart plotting (new, Mod 2) — the graphical counterpart to `ParetoSensitivityReport.to_ascii_chart()` (Section 6.8)
 - `tests/test_reporting.py` (smoke tests only — rendering correctness is best verified visually, not asserted numerically)
 
 **Granular Task List:**
@@ -777,19 +811,23 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 1. Implement `plot_histogram(counts, bin_edges, dof_label, ax=None) -> matplotlib.axes.Axes`: single-DoF histogram, returns the Axes so callers (GUI or examples scripts) can embed or further customize it rather than this function owning figure-level layout decisions.
 2. Implement `plot_translation_projection(points: np.ndarray, bounding_shape: dict, plane: Literal["xy","xz","yz"], ax=None) -> matplotlib.axes.Axes`: scatter the trial point cloud (or a representative subsample if `N` is large — define a practical subsampling cutoff, e.g., 2000 points, to keep plots legible and fast) projected onto the requested plane, overlay the bounding box/ellipse outline for that projection.
 3. Implement `plot_rotation_summary(rotvecs: np.ndarray, cone: dict, box: dict, ax=None) -> matplotlib.axes.Axes`: a combined view with the cone (locked 2026-06-23 as the lead representation, per Section 6.9 Step 3) drawn as the prominent primary element — e.g., a shaded cone/circle at `max_angle` with the `mean_axis` marked — and the per-axis box rendered as a smaller, secondary annotation (e.g., three thin tick marks or a corner inset) rather than as a co-equal visual.
-4. Implement a top-level convenience function `generate_frame_report(trial_data, frame_name) -> matplotlib.figure.Figure`: assembles a multi-panel figure (3 translation histograms + 3 rotation histograms + 2–3 translation projections + 1 rotation summary) for a single Frame in one call — this is what `examples/` scripts and eventually the GUI results viewer will call most often.
-5. Write `tests/test_reporting.py` as smoke tests: confirm each plotting function runs without raising on representative synthetic data and returns a valid `Axes`/`Figure` object — do not attempt to assert on pixel content; visual correctness is a human-review concern, not an automated-test concern.
+4. **New this revision (Mod 2) — implement `plot_pareto_sensitivity(report: ParetoSensitivityReport, ax=None, top_n=10) -> matplotlib.axes.Axes`:** a horizontal bar chart of the `top_n` ranked edge/DoF contributions (descending), with any remaining contributions grouped into a single "Others" bar — matching the example layout in Mod 2's directive. Must visibly include the first-order-linear-approximation caveat from Section 6.8 Step 8 as an annotation or caption on the chart itself, not just in surrounding prose, since this chart is the one most likely to be screenshotted/shared standalone in a sourcing discussion (Section 1.4) where the caveat could otherwise get lost.
+5. Implement a top-level convenience function `generate_frame_report(trial_data, frame_name) -> matplotlib.figure.Figure`: assembles a multi-panel figure (3 translation histograms + 3 rotation histograms + 2–3 translation projections + 1 rotation summary) for a single Frame in one call — this is what `examples/` scripts and eventually the GUI results viewer will call most often.
+6. Implement `generate_sensitivity_report(report: ParetoSensitivityReport) -> matplotlib.figure.Figure`: a standalone single-panel figure wrapping Step 4's `plot_pareto_sensitivity()` — kept separate from `generate_frame_report()` since the sensitivity breakdown is queried per point-pair target, not per Frame, and is a distinct enough deliverable (per Section 1.4's "Sensitivity Pinpointing" use case) to warrant its own report-generation entry point.
+7. Write `tests/test_reporting.py` as smoke tests: confirm each plotting function runs without raising on representative synthetic data and returns a valid `Axes`/`Figure` object — do not attempt to assert on pixel content; visual correctness is a human-review concern, not an automated-test concern.
 
 **Interfaces:**
 
-- *Depends on:* `postprocess/stats.py`, `postprocess/bounding_shapes.py`, `matplotlib`.
-- *Used by:* `examples/` scripts directly (Milestone A), eventually `gui/results_viewer/` (Milestone B, likely embedding these same Figures/Axes into Qt widgets via Matplotlib's Qt backend rather than re-implementing plotting logic in the GUI layer).
+- *Depends on:* `postprocess/stats.py` (including the new `ParetoSensitivityReport`, Mod 2), `postprocess/bounding_shapes.py`, `matplotlib`.
+- *Used by:* `examples/` scripts directly (Milestone A and B-1), eventually `gui/results_viewer/` (Milestone B-2, likely embedding these same Figures/Axes into Qt widgets via Matplotlib's Qt backend rather than re-implementing plotting logic in the GUI layer).
 - *Public API (conceptual):*
   ```
   plot_histogram(counts, bin_edges, dof_label, ax=None) -> Axes
   plot_translation_projection(points, bounding_shape, plane, ax=None) -> Axes
   plot_rotation_summary(rotvecs, cone, box, ax=None) -> Axes
+  plot_pareto_sensitivity(report: ParetoSensitivityReport, ax=None, top_n=10) -> Axes   # new, Mod 2
   generate_frame_report(trial_data, frame_name) -> Figure
+  generate_sensitivity_report(report: ParetoSensitivityReport) -> Figure                # new, Mod 2
   ```
 
 ---
@@ -877,7 +915,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.13 `gui/main_window.py`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session. GUI modules are specified at a coarser grain than core/sim/postprocess/io, consistent with Section 10's rule that GUI work does not begin until Milestone A is complete — these task lists will be revisited and sharpened immediately before Milestone B begins.)*
+*(Last revised: 2026-06-23 — Claude, detailed planning session. GUI modules are specified at a coarser grain than core/sim/postprocess/io, consistent with Section 10's rule that GUI work does not begin until the engine is proven — these task lists will be revisited and sharpened immediately before Milestone C begins (Section 7.4), once Milestones A, B-1, and B-2 are complete.)*
 
 **Responsibility:** Top-level PySide6 application window; owns the currently-loaded `ProjectModel`, hosts the other GUI panels, and owns save/load/new-project actions.
 
@@ -887,17 +925,17 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - Docked or tabbed hosting of the panels in Sections 6.14–6.18
 - A single in-memory `ProjectModel` instance treated as the source of truth for the currently open project
 
-**Granular Task List (to be sharpened before Milestone B):**
+**Granular Task List (to be sharpened before Milestone C):**
 1. Implement the `QMainWindow` shell with a menu bar and status bar.
 2. Implement New/Open/Save/Save As actions, calling `io/serializer.py` directly (Section 5.3 — GUI talks to `io.schema` only).
 3. Implement a simple in-memory "dirty" flag (unsaved changes indicator) tied to edits made in any child panel.
-4. Lay out the child panels (Sections 6.14–6.18) as dock widgets or tabs — decide layout once those panels' own specs are sharpened immediately before Milestone B.
+4. Lay out the child panels (Sections 6.14–6.18) as dock widgets or tabs — decide layout once those panels' own specs are sharpened immediately before Milestone C.
 5. Wire a top-level error-display mechanism (e.g., a status bar message or modal dialog) for surfacing `ProjectLoadError` and validation errors from `io/serializer.py` / `io/schema.py` in a user-friendly way.
 
 **Interfaces:**
 
 - *Depends on:* `io/schema.py`, `io/serializer.py`, all `gui/*` panel modules, `PySide6`.
-- *Used by:* the application entry point (`main.py`, not yet listed in Section 5.1 — add it as the top-level launch script when Milestone B begins).
+- *Used by:* the application entry point (`main.py`, not yet listed in Section 5.1 — add it as the top-level launch script when Milestone C begins).
 
 ---
 
@@ -907,7 +945,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Responsibility:** Build/edit the Frame graph — add/remove Frames and Edges, enter each edge's nominal transform in any supported format.
 
-**Granular Task List (to be sharpened before Milestone B):**
+**Granular Task List (to be sharpened before Milestone C):**
 1. A graph/tree view widget listing Frames and Edges (likely `QTreeWidget` or a lightweight embedded NetworkX-to-Qt graph view — decide once this task is reached).
 2. An "Add Frame" / "Add Edge" dialog flow, writing directly into the in-memory `ProjectModel` (never into a live `FrameGraph`, per Section 5.3).
 3. A multi-format HTM entry widget supporting all four input representations (Section 2.1), with a format-selector control and live validation feedback (e.g., flagging a non-orthonormal raw-matrix entry immediately, reusing `core/transforms.py`'s `HTM` construction-time validation, Section 6.1 Step 3, as the validation backend).
@@ -926,7 +964,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Responsibility:** Per-edge, per-DoF tolerance entry: distribution, bound, sigma-level, locked flag.
 
-**Granular Task List (to be sharpened before Milestone B):**
+**Granular Task List (to be sharpened before Milestone C):**
 1. A per-edge panel exposing all 6 DoF, each with a distribution selector (`uniform`/`normal`), bound entry, conditionally-shown sigma-level entry (only when `normal` selected), and a locked checkbox.
 2. A "bulk apply" convenience action (e.g., "apply this distribution/sigma-level default to all DoF on this edge" or "...to all edges in this project") to avoid tedious repetitive entry — purely a UX nicety, not core to correctness.
 3. Live validation reusing `core/tolerance.py`'s `ToleranceSpec` construction-time checks (Section 6.2 Step 1).
@@ -944,7 +982,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Responsibility:** Configure and trigger a simulation run: mode selection, trial count, seed, distribution settings.
 
-**Granular Task List (to be sharpened before Milestone B):**
+**Granular Task List (to be sharpened before Milestone C):**
 1. Mode selector (FK verification vs. IK allocation), with the panel's visible fields changing based on selection (e.g., IK mode additionally needs a target Frame pair + target tolerance entry, reusing the `gui/tolerance_editor/` widget for the target's bound entry).
 2. Trial count and seed entry, with the seed defaulting to a random value but always displayed/editable (so a specific run is always reproducible by recording the seed shown).
 3. A "Run" button that constructs live `core`/`sim` objects from the current `ProjectModel` (the one and only place this conversion happens, per Section 5.3) and invokes the appropriate engine (`MonteCarloFKEngine` or `AllocationEngine`), likely on a background thread/`QThread` to avoid freezing the UI during larger runs.
@@ -963,7 +1001,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Responsibility:** Display simulation results — envelope tables, histograms, 2D bounding-shape projections — per Frame or per saved point-pair analysis.
 
-**Granular Task List (to be sharpened before Milestone B):**
+**Granular Task List (to be sharpened before Milestone C):**
 1. A Frame/analysis selector driving which result set is currently displayed.
 2. An envelope summary table (reusing `postprocess/stats.py`'s `frame_envelope_box`/`point_pair_envelope_box` output directly).
 3. Embedded Matplotlib canvases (via `matplotlib.backends.backend_qtagg`) displaying `postprocess/reporting.py`'s `generate_frame_report()` output — reuse the plotting module's Figures directly rather than re-implementing plotting in Qt-native widgets.
@@ -982,7 +1020,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Responsibility:** Define and persist point-pair analyses — select any two Frames, view their relative-pose envelope, save the analysis definition into the project file.
 
-**Granular Task List (to be sharpened before Milestone B):**
+**Granular Task List (to be sharpened before Milestone C):**
 1. A two-Frame selector (dropdowns or graph-click selection, reusing the Frame list from `gui/graph_editor/`'s underlying `ProjectModel`).
 2. A "Save Analysis" action writing a new `SavedAnalysisModel` entry into the `ProjectModel` (Section 6.11 Step 7), so it persists across save/load.
 3. Display of the resulting relative-pose envelope, reusing `gui/results_viewer/`'s display components rather than duplicating presentation logic.
@@ -1010,7 +1048,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 1. Write `examples/single_chain_fk_example.py`: define a simple 3–4 edge serial chain representative of a real mechanical stack-up, set tolerances on each edge (mixing `uniform` and `normal` for illustration), run `MonteCarloFKEngine`, print/plot the resulting envelope via `postprocess/reporting.py`'s `generate_frame_report()`.
 2. Write `examples/multi_chain_shared_frame_example.py`: define two chains sharing a common upstream Frame (the optical-mount scenario from Section 1.1/1.3), run the FK engine once, and explicitly demonstrate `postprocess/stats.py`'s `point_pair_envelope_box()` between Frames on the two different downstream branches — with inline commentary explaining why the relative tolerance is tighter than either branch's absolute tolerance (the shared-ancestor cancellation effect).
-3. Write `examples/allocation_example.py` (added once Milestone B's `sim/allocation.py` exists): define a chain with unset/free tolerances, specify a target end-effector envelope, run `AllocationEngine.allocate()`, print the resulting `AllocationResult` — including the baseline linear allocation, the corrected allocation, and convergence status — with inline commentary on what the gap between baseline and corrected reveals about the chain's geometric leverage.
+3. Write `examples/allocation_example.py` (added once Milestone B-2's `sim/allocation.py` exists): define a chain with unset/free tolerances, specify a target end-effector envelope, run `AllocationEngine.allocate()`, print the resulting `AllocationResult` — including the baseline linear allocation, the corrected allocation, and convergence status — with inline commentary on what the gap between baseline and corrected reveals about the chain's geometric leverage.
 4. Each script should be runnable standalone (`python examples/single_chain_fk_example.py`) with no GUI dependency, and should print enough intermediate information (not just a final plot) that a reader can follow the logic without running it themselves.
 
 **Interfaces:**
@@ -1054,7 +1092,9 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 # 7. Project Phases & Time Allocation
 
-**Total estimated effort: 130–170 hours**, split into two milestones. Hours assume AI-assisted ("vibe-coded") development with the project owner's light supervision and an ME/robotics background sufficient to validate the math by hand-checking simple cases.
+**Total estimated effort: ~165–230 hours**, split across four phases (revised this session, per Mod-2/Mod-3 cross-review — the increase from the original 130–170 hour estimate reflects genuinely new scope added this revision: the Pareto sensitivity engine, the explicit Physical Validation Test Suite, and a dedicated reporting-module task, not re-estimation of unchanged work). Hours assume AI-assisted ("vibe-coded") development with the project owner's light supervision and an ME/robotics background sufficient to validate the math by hand-checking simple cases.
+
+**Revised milestone order (locked this session):** Milestone A is unchanged. What was previously a single "Milestone B" is now split into **B-1 (Forward Analysis & Sensitivities)** and **B-2 (Inverse Damped Allocation)**, with **B-2 explicitly gated on B-1 passing all three Section 9.1 physical validation benchmarks** — the riskier, more complex inverse-allocation work is not started until the forward engine and its sensitivity analysis have been proven against concrete physical anchors, not just internal hand-calculated test cases. GUI work is broken out into its own later phase, **Milestone C**, consistent with the existing rule (Section 10) that GUI work never starts before the engine is proven.
 
 ## 7.1 Milestone A — V0.5 ("Proof of Concept / Minimum Viable Tool")
 
@@ -1074,29 +1114,57 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Milestone A exit criteria:** Project owner can define a real kinematic chain from their own work in a Python script, run both worst-case and statistical Monte Carlo FK verification, and trust the printed/plotted envelope output because it has been checked against at least one hand calculation.
 
-## 7.2 Milestone B — V1.0 ("Full Vision")
+## 7.2 Milestone B-1 — Forward Analysis & Sensitivities
 
-**Goal:** Adds inverse allocation, bounding-shape outputs, file save/load, and the full GUI on top of the proven V0.5 engine — no rework of Milestone A code, only additive layers.
+**Goal:** Adds bounding-shape outputs, the Pareto sensitivity engine, plotting/reporting, and file save/load on top of the proven V0.5 forward engine — and, critically, **proves the forward engine and sensitivity analysis against the three concrete physical benchmarks in Section 9.1** before any inverse-allocation work begins. No rework of Milestone A code, only additive layers.
 
-**Target: ~90–125 additional hours.**
+**Target: ~49–70 hours.**
 
 | # | Task | Module(s) | Est. Hours |
 |---|---|---|---|
-| B1 | Bounding shape fitting: bounding box/ellipsoid/sphere (translation), bounding cone (rotation), from stored trial point clouds | `postprocess/bounding_shapes.py` | 8–12 |
-| B2 | Inverse allocation engine: Jacobian/sensitivity derivation, `EqualAllocation` objective, closed-form/near-closed-form solve, locked-edge handling | `sim/allocation.py` | 18–25 |
-| B3 | MC validation pass for proposed allocations + discrepancy reporting | `sim/allocation.py` | (included in B2) |
-| B4 | Pydantic schema + JSON save/load, validation-on-load with actionable errors | `io/schema.py`, `io/serializer.py` | 8–10 |
-| B5 | GUI: graph/chain editor (add/edit Frames & Edges, multi-format HTM entry) | `gui/graph_editor/` | 10–14 |
-| B6 | GUI: tolerance editor (per-DoF distribution, bound, sigma-level, lock toggle) | `gui/tolerance_editor/` | 6–8 |
-| B7 | GUI: run panel (mode select, N trials, seed, distribution, run trigger) | `gui/run_panel/` | 4–6 |
-| B8 | GUI: results viewer (envelope tables, histograms, 2D projections of bounding shapes via Matplotlib) | `gui/results_viewer/` | 10–14 |
-| B9 | GUI: point-pair analysis panel + saved-analysis persistence in project file | `gui/point_pair_panel/` | 5–8 |
-| B10 | Additional/expanded test coverage, especially around allocation engine edge cases (infeasible targets, all-locked edges, etc.) | `tests/` | 8–12 |
-| B11 | Integration, bug fixing, end-to-end polish pass | — | 12–15 |
+| B1-1 | Extend `core/frame_graph.py` with the shared sensitivity primitives (`adjoint()`, `compute_sensitivity()`, `path_edges_between()`) — relocated/added here per Mod 2; not needed until this milestone actually consumes them, so built now rather than during Milestone A | `core/frame_graph.py` | 6–9 |
+| B1-2 | Bounding shape fitting: bounding box/ellipsoid/sphere (translation), bounding cone (rotation, locked as lead representation), rotation-vector type-hardening | `postprocess/bounding_shapes.py` | 8–12 |
+| B1-3 | Pareto sensitivity engine: `compute_tolerance_sensitivities()`, `ParetoSensitivityReport`, variance-contribution math (uniform/normal consistency) — new this revision, Mod 2 | `postprocess/stats.py` | 8–12 |
+| B1-4 | Plotting/reporting: histograms, 2D bounding-shape projections, Pareto sensitivity bar chart with embedded linear-approximation caveat | `postprocess/reporting.py` | 8–10 |
+| B1-5 | Pydantic schema + JSON save/load, validation-on-load with actionable errors | `io/schema.py`, `io/serializer.py` | 8–10 |
+| B1-6 | **Physical Validation Test Suite implementation (Section 9.1) — gating deliverable, not optional:** the Linear Stack-Up (RSS) Benchmark, the Sine-Bar Lever Arm Benchmark, and the Common-Ancestor Cancellation Benchmark, each as a dedicated, named regression test | `tests/` | 8–12 |
+| B1-7 | Example scripts demonstrating the new forward-analysis capabilities (sensitivity Pareto breakdown, component-selection and mitigation-verification use cases from Section 1.4) | `examples/` | 3–5 |
 
-**Milestone B exit criteria:** A double-clickable (or `python main.py`-launchable) desktop application where a user with no Python experience could define a system, set tolerances, run both modes, and extract bounding-shape decisions — backed by the same validated engine from Milestone A.
+**Milestone B-1 exit criteria:** All three Section 9.1 physical validation benchmarks pass. The Pareto sensitivity breakdown produces correct, hand-verifiable rankings on a representative chain. Bounding shapes, plots, and project save/load all function end-to-end via script/CLI usage (still no GUI). **Milestone B-2 does not begin until this exit criteria is met.**
 
-## 7.3 Deferred / Explicitly Out of Scope for V1.0
+## 7.3 Milestone B-2 — Inverse Damped Allocation
+
+**Goal:** The inverse tolerance allocation engine, including the iterative nonlinear damping/correction loop (Section 6.7). Explicitly gated on Milestone B-1's physical validation passing — this is intentionally the last and riskiest piece of core engine work, built only once the forward engine and its sensitivity machinery are proven.
+
+**Target: ~24–37 hours.**
+
+| # | Task | Module(s) | Est. Hours |
+|---|---|---|---|
+| B2-1 | `AllocationObjective` interface + `EqualAllocation` implementation + `AllocationEngine.solve()` — built on top of B1-1's already-validated sensitivity primitive, no Jacobian math re-implemented here | `sim/allocation.py` | 10–15 |
+| B2-2 | Iterative nonlinear damping/correction loop: `AllocationEngine.allocate()`, `AllocationResult`, convergence/non-convergence handling per the locked `gamma`/`max_iter`/status-message contract (Section 6.7, Step 5) | `sim/allocation.py` | 8–12 |
+| B2-3 | Test coverage: equal-allocation sanity check, locked-edge and all-locked-edge cases, MC validation discrepancy reporting, damping loop convergence and non-convergence tests | `tests/` | 6–10 |
+
+**Milestone B-2 exit criteria:** `AllocationEngine.allocate()` produces a correctly-converging allocation on the Sine-Bar Lever Arm Benchmark's geometry (the known high-leverage case from Section 9.1.2), correctly reports non-convergence on a deliberately infeasible target, and the baseline-vs-corrected diagnostic is verified to reflect real geometric leverage on at least one representative chain.
+
+## 7.4 Milestone C — GUI
+
+**Goal:** The full PySide6 desktop application on top of the proven engine (Milestones A, B-1, B-2). No engine logic is implemented here — this phase only builds the GUI layer described in Sections 6.13–6.18, talking exclusively to the `io.schema` data model (Section 5.3).
+
+**Target: ~55–77 hours.**
+
+| # | Task | Module(s) | Est. Hours |
+|---|---|---|---|
+| C1 | GUI: graph/chain editor (add/edit Frames & Edges, multi-format HTM entry) | `gui/graph_editor/` | 10–14 |
+| C2 | GUI: tolerance editor (per-DoF distribution, bound, sigma-level, lock toggle) | `gui/tolerance_editor/` | 6–8 |
+| C3 | GUI: run panel (mode select, N trials, seed, distribution, run trigger; IK mode calls `allocate()` by default) | `gui/run_panel/` | 4–6 |
+| C4 | GUI: results viewer (envelope tables, histograms, 2D projections of bounding shapes, Pareto sensitivity chart, via Matplotlib) | `gui/results_viewer/` | 10–14 |
+| C5 | GUI: point-pair analysis panel + saved-analysis persistence in project file | `gui/point_pair_panel/` | 5–8 |
+| C6 | Additional/expanded test coverage at the GUI integration level | `tests/` | 8–12 |
+| C7 | Integration, bug fixing, end-to-end polish pass | — | 12–15 |
+
+**Milestone C exit criteria:** A double-clickable (or `python main.py`-launchable) desktop application where a user with no Python experience could define a system, set tolerances, run both modes, and extract bounding-shape and sensitivity decisions — backed by the same validated engine from Milestones A, B-1, and B-2.
+
+## 7.5 Deferred / Explicitly Out of Scope for V1.0
 
 Recorded here so they are not forgotten, but also not accidentally started early:
 
@@ -1146,6 +1214,28 @@ Because this tool produces engineering decisions about physical hardware toleran
 3. **Point-pair and shared-frame test cases** explicitly verify that two downstream Frames sharing a common upstream edge see *identical* sampled perturbation for that edge within a given trial (Section 2.4) — this is a correctness-critical property, not just a nice-to-have, and deserves a dedicated regression test.
 4. **Allocation engine validation** always includes the MC-validation-pass discrepancy check (Section 3.2, step 3) as part of its own test suite, not just as a runtime feature.
 
+## 9.1 Physical Validation Test Suite
+
+*(Added 2026-06-23 — Project Owner, per cross-review, Mod 3. These three benchmarks are named, concrete physical anchors for the test suite — each one checks the engine's output against a classical, independently-derivable analytical result, rather than only against the engine's own internal hand-calculated cases from Section 9 above. Per the revised milestone order (Section 7), Milestone B-1 is not considered complete until all three pass.)*
+
+### 9.1.1 The Linear Stack-Up Benchmark
+
+**Setup:** A 5-link purely serial translation chain (no rotation, or zero nominal rotation between links — pure translational stack-up).
+
+**Verification:** Run forward Monte Carlo (Section 6.6) with `"normal"`-distribution tolerances on each link's translational DoF. Confirm the resulting output variance at the chain's end **exactly matches the classical analytical Root-Sum-Square (RSS) calculation** — i.e., `σ_total² = Σ σ_i²` for independent per-link variances, which holds exactly (not just approximately) for a purely linear, uncoupled translation stack-up. This is the simplest possible case where the engine's Monte Carlo output has a closed-form analytical answer, and it must match to within Monte Carlo sampling error (quantify the expected sampling error for the chosen `n_trials` and assert within that bound, not an arbitrarily loose tolerance).
+
+### 9.1.2 The Sine-Bar Lever Arm Benchmark
+
+**Setup:** A single angular pivot (one edge with a nonzero rotational tolerance, zero translational tolerance) followed by a fixed translational offset vector of length `L` (a second edge, zero tolerance, pure translation along some axis).
+
+**Verification:** For small angles (**≤ 1 mrad**, comfortably within the small-angle regime this entire tool is built on, per Section 1.2), confirm the lateral error generated in the forward kinematics pass **perfectly matches the analytical cross-coupling relationship Δx ≈ L·θ**. This is the direct physical validation of the exact geometric-leverage effect that motivated the inverse allocation engine's damping loop (Section 6.7) — if this benchmark doesn't hold, the entire justification for that damping loop is unfounded, so this test is load-bearing for more than just the FK engine.
+
+### 9.1.3 The Common-Ancestor Cancellation Benchmark
+
+**Setup:** A split-tree layout: an inspection camera Frame and a target sample Frame, each independently positioned, but both branching from a shared structural Frame representing a granite base — which itself sits beneath a large, loosely-toleranced edge representing the granite base's attachment to the room/building floor. **Precise mapping onto the model (stated explicitly to remove any ambiguity):** the room/building floor is the graph's root Frame; the granite base is a child Frame connected to the root via one edge carrying a large, deliberately loose tolerance (representing real-world floor-to-base mounting uncertainty); the camera and sample Frames are each children of the granite base via their own separate edges/chains.
+
+**Verification:** Run a relative-transform point-pair query (`point_pair_envelope_box`, Section 6.8) between the camera Frame and the sample Frame. Confirm that the large absolute structural tolerance on the floor-to-granite-base edge **completely cancels out of the relative measurement** — the camera-to-sample envelope should reflect only the camera's and sample's own chain tolerances, with no contribution from the shared floor-to-base edge, regardless of how loose that shared edge's tolerance is. This is the formal validation of Section 2.4's "Monte Carlo Consistency Across Shared Edges" design property, given a sharper, physically-motivated framing — and it is the same underlying mechanism that powers the "Mitigation Verification" use case named in Section 1.4 (grounding a metrology rail to a shared base plate to achieve cancellation at the sensor plane).
+
 ---
 
 # 10. Working Process Notes (For Future Claude Sessions)
@@ -1169,4 +1259,5 @@ Because this tool produces engineering decisions about physical hardware toleran
 | 2026-06-23 | Project Owner | Confirmed `locked` semantics in `core/tolerance.py` (Section 6.2): a locked DoF is still sampled in FK mode (it has a real, fixed physical tolerance); `locked` only excludes it from the free-variable set in inverse allocation (Section 6.7). No change to the document, decision confirmed as already specified. |
 | 2026-06-23 | Project Owner | Resolved the previously-open rotation bounding-shape decision: **the cone (`max_angle` + `mean_axis`) is the confirmed lead representation** for angular error, with the per-axis box retained as a secondary/expandable cross-check rather than a co-equal display. Updated Section 6.9 (`postprocess/bounding_shapes.py`), Section 6.10 (`postprocess/reporting.py`), Section 6.17 (`gui/results_viewer/`), and the Section 8 reference table accordingly. |
 | 2026-06-23 | Project Owner (cross-checked by an independent reviewing agent; resolved by Claude) | Resolved three issues raised in an independent architectural review: (1) **`sim/allocation.py`** — added a top-level `AllocationEngine.allocate()` method wrapping the closed-form linear allocation in an iterative nonlinear damping/correction loop, addressing geometric cross-coupling (`dx ≈ L·θ`) in high-leverage serial chains: runs an `N_validate=1000`-trial MC check, applies a uniform damping factor (`gamma`, default range `[0.7, 0.95]`) to free edges' *angular* DoF bounds only when validation fails, capped at `max_iter=10`, returning a new `AllocationResult` that explicitly preserves **both** the uncorrected baseline linear allocation and the final corrected allocation (the gap between them is itself a diagnostic of chain leverage), with the exact non-convergence status message `"Allocation could not converge to target budget"` locked verbatim. (2) **`core/frame_graph.py` / Section 2.3** — explicitly rejected an auto-generated global-origin/silent-auto-connection proposal as unsafe for an error-budgeting tool (it would silently fabricate zero-tolerance rigid connections the user never specified); instead added new Section 2.3.1 documenting the "Common Physical Base" explicit-junction-Frame modeling pattern with a worked example, and locked the exact `DisjointFramesError` message text raised by `nominal_transform_between()` when two Frames share no path. (3) **`postprocess/bounding_shapes.py`** — hardened the `fit_rotation_cone()`/`fit_rotation_box()` interface to accept only pre-extracted `(N,3)` small-angle rotation-vector arrays (convention named explicitly: **ω = θu**), with a runtime shape check rejecting raw `(N,4,4)` pose arrays, preventing future shortcut implementations from reintroducing multi-axis coordinate-coupling artifacts. Updated Sections 2.3, 6.3, 6.7, 6.8, 6.9, and the corresponding test task lists accordingly. No code was written in this revision — design-specification update only, per explicit instruction. |
+| 2026-06-23 | Project Owner (cross-checked by a second independent reviewing agent, end-user perspective; resolved by Claude) | Integrated three further conceptual additions (Mods 1–3): **(Mod 1)** added new Section 1.4 ("Core Engineering Decisions Enabled") naming the three concrete categories of engineering decision the tool exists to support — component selection/sourcing, sensitivity pinpointing, and mitigation verification — each tied directly to a specific tool capability. **(Mod 2)** added a standalone Pareto-sorted tolerance-sensitivity breakdown, `compute_tolerance_sensitivities()`, to `postprocess/stats.py` (Section 6.8), elevating sensitivity analysis out of the inverse allocator into its own forward-analysis deliverable; as a structural refinement, relocated the shared `adjoint()`/`compute_sensitivity()` primitive to `core/frame_graph.py` (Section 6.3) so `postprocess/stats.py` and `sim/allocation.py` consume one implementation rather than risking two independent copies of the same math drifting apart; documented the first-order-linear-approximation caveat on the Pareto output explicitly, including as an on-chart annotation in `postprocess/reporting.py` (Section 6.10), so the breakdown can't be mistaken for an exact nonlinear attribution. **(Mod 3)** added new Section 9.1 ("Physical Validation Test Suite") with three named, physically-grounded benchmarks — the Linear Stack-Up (RSS) Benchmark, the Sine-Bar Lever Arm Benchmark (`Δx ≈ L·θ`), and the Common-Ancestor Cancellation Benchmark (with an explicit, unambiguous mapping of "granite base" / "room floor" onto Frame-graph terms) — replacing generic "hand-calculated case" placeholders with concrete physical anchors. **Restructured Section 7's milestone plan accordingly:** Milestone A unchanged; the former single "Milestone B" split into **B-1 (Forward Analysis & Sensitivities** — bounding shapes, Pareto sensitivity engine, reporting, IO/schema, gated by Section 9.1 passing) and **B-2 (Inverse Damped Allocation** — explicitly gated on B-1's exit criteria); GUI work broken out into its own **Milestone C**. Updated the total estimated-effort range to ~165–230 hours, reflecting genuinely new scope rather than re-estimation. No code was written in this revision — design-specification update only, per explicit instruction. |
 
