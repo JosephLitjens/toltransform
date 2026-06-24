@@ -61,6 +61,18 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** A (not yet started)
-- **Last completed task:** none — design spec finalized, no code written yet
-- **Next task:** A1 — `core/transforms.py` + `core/conversions.py` (Section 6.1, 6.4)
+- **Current milestone:** A (in progress)
+- **Last completed task:** A4 — `sim/monte_carlo_fk.py` (commit `744c562`, 18 tests, 89 total passing)
+- **Next task:** A5 — `postprocess/stats.py` (Section 6.8)
+
+**Note on venv:** the venv is at `.venv/` (not `venv/`). Use `source .venv/bin/activate`.
+
+**Completed tasks:**
+- A1: `core/transforms.py` + `core/conversions.py` — commit `a31218e` (26 tests)
+- A2: `core/tolerance.py` + `core/sampling.py` — commit `3ac0eed` (21 tests)
+- A3: `core/frame_graph.py` — commit `d81645c` (24 tests); also completes B1-1 (adjoint/compute_sensitivity built here)
+- A4: `sim/monte_carlo_fk.py` — commit `744c562` (18 tests)
+
+**Two math corrections made in A3 (documented in Section 11 changelog and Section 6.3 task list):**
+- Adjoint formula: `[[R, skew(t)@R],[0,R]]` — NOT `[[R,0],[skew(t)@R,R]]`
+- Sensitivity formula: `J_i = Ad_{T_{frame_a→exit_i}}` — NOT `Ad_{T_{exit→frame_b}}`
