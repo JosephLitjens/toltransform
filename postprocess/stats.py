@@ -12,21 +12,61 @@ Rotation-vector convention (locked, ω = θu):
     fit_rotation_box input contract (no further conversion needed).
 
 Scope:
-    This module implements Steps 1-7 of Section 6.8 (the basic forward-stats
-    functions). Steps 8-9 (Pareto sensitivity breakdown, ParetoSensitivityReport)
-    are implemented in Milestone B-1 task B1-3 and will be added to this file then.
+    This module implements all Steps 1-9 of Section 6.8.
+    Steps 1-7: basic forward-stats functions (frame_envelope_box, percentiles, etc.)
+    Steps 8-9: Pareto sensitivity breakdown — ParetoSensitivityReport dataclass and
+               compute_tolerance_sensitivities() (added in B1-3).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from core.frame_graph import FrameGraph
+from core.frame_graph import FrameGraph, compute_sensitivity
 from sim.monte_carlo_fk import TrialData
 
 # DoF label order -- must match the [dx,dy,dz,rx,ry,rz] convention throughout the codebase.
 DOF_LABELS = ["dx", "dy", "dz", "rx", "ry", "rz"]
+
+
+# -- Public data types --------------------------------------------------------
+
+@dataclass
+class ParetoSensitivityReport:
+    """Pareto-sorted first-order tolerance contribution breakdown.
+
+    ranked_contributions is a list of (edge_name, dof_label, percentage) tuples,
+    sorted descending by percentage. Percentages across all entries sum to ≈100.
+
+    NOTE: Contributions are first-order linear approximations computed from the
+    small-angle adjoint Jacobian. For high-leverage chains (long lever arms,
+    large rotational offsets), actual nonlinear contributions can differ.
+    """
+    ranked_contributions: list[tuple[str, str, float]]  # (edge_name, dof_label, pct)
+    total_variance: float                               # sum of all raw contributions
+
+    def to_ascii_chart(self, top_n: int = 10) -> str:
+        """Text bar chart of the top-N contributors; remainder grouped as '(others)'."""
+        lines = ["Pareto Sensitivity Breakdown (first-order approximation)"]
+        lines.append("─" * 65)
+        shown = self.ranked_contributions[:top_n]
+        others_pct = sum(pct for _, _, pct in self.ranked_contributions[top_n:])
+        max_pct = shown[0][2] if shown else 0.0
+        bar_width = 28
+        for edge_name, dof, pct in shown:
+            label = f"{edge_name} ({dof})"
+            filled = int(round(pct / max_pct * bar_width)) if max_pct > 0 else 0
+            bar = "█" * filled + "░" * (bar_width - filled)
+            lines.append(f"  {label:<36s}  {bar}  {pct:5.1f}%")
+        if others_pct > 0.0:
+            lines.append(f"  {'(others)':<36s}  {'░' * bar_width}  {others_pct:5.1f}%")
+        lines.append("─" * 65)
+        lines.append("  NOTE: first-order approximation — see class docstring.")
+        lines.append(f"  Total variance: {self.total_variance:.3e}")
+        return "\n".join(lines)
 
 
 # -- Private helpers ----------------------------------------------------------
@@ -265,3 +305,71 @@ def point_pair_envelope_box(
         label: {"min": float(errors[:, i].min()), "max": float(errors[:, i].max())}
         for i, label in enumerate(DOF_LABELS)
     }
+
+
+# -- Pareto sensitivity breakdown ---------------------------------------------
+
+def compute_tolerance_sensitivities(
+    frame_graph: FrameGraph,
+    frame_a: str,
+    frame_b: str,
+) -> ParetoSensitivityReport:
+    """First-order Pareto breakdown of tolerance contributions between two frames.
+
+    Uses the adjoint Jacobian from compute_sensitivity() to propagate each edge's
+    variance to the 6-DoF output at frame_b (relative to frame_a), then ranks
+    edge/DoF pairs by their percentage of total output variance.
+
+    Variance formula (consistent with sim/allocation.py and Section 9.1.1):
+        uniform, bound=b  →  var = b²/3
+        normal,  bound=b, sigma_level=k  →  var = (b/k)²
+
+    Locked DoFs (bound=0) contribute zero variance — no special-casing needed.
+
+    Raises DisjointFramesError (propagated from path_edges_between) if frame_a
+    and frame_b are in different connected components.
+
+    Parameters
+    ----------
+    frame_graph : FrameGraph
+    frame_a, frame_b : str
+        The analysis endpoints. Typically frame_a is the chain root.
+
+    Returns
+    -------
+    ParetoSensitivityReport
+        Entries ranked descending by percentage contribution to total output variance.
+    """
+    path = frame_graph.path_edges_between(frame_a, frame_b)
+    edges = [edge for edge, _ in path]
+    edge_names = [e.name for e in edges]
+
+    J = compute_sensitivity(frame_graph, frame_a, frame_b, edge_names)  # (6, 6*n)
+
+    raw_contributions: list[tuple[str, str, float]] = []
+    for i, edge in enumerate(edges):
+        for j, label in enumerate(DOF_LABELS):
+            spec = edge.tolerance[j]
+            if spec.distribution == "uniform":
+                var_j = (spec.bound ** 2) / 3.0
+            else:  # "normal"
+                var_j = (spec.bound / spec.sigma_level) ** 2
+            J_col = J[:, i * 6 + j]                          # shape (6,)
+            raw_contributions.append(
+                (edge.name, label, float(np.dot(J_col, J_col) * var_j))
+            )
+
+    total_variance = sum(c[2] for c in raw_contributions)
+
+    if total_variance <= 0.0:
+        return ParetoSensitivityReport(
+            ranked_contributions=[(n, d, 0.0) for n, d, _ in raw_contributions],
+            total_variance=0.0,
+        )
+
+    ranked = sorted(
+        [(n, d, 100.0 * raw / total_variance) for n, d, raw in raw_contributions],
+        key=lambda x: x[2],
+        reverse=True,
+    )
+    return ParetoSensitivityReport(ranked_contributions=ranked, total_variance=total_variance)

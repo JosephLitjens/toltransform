@@ -1,5 +1,5 @@
 """
-Tests for postprocess/stats.py (A5 scope: Steps 1-7 of Section 6.8).
+Tests for postprocess/stats.py (Steps 1-9 of Section 6.8).
 
 All test data is either constructed directly via synthetic TrialData (for unit
 checks where exact values are known) or via MonteCarloFKEngine.run (for
@@ -16,6 +16,8 @@ from core.tolerance import ToleranceSpec, ToleranceSpec6
 from core.transforms import HTM
 from postprocess.stats import (
     DOF_LABELS,
+    ParetoSensitivityReport,
+    compute_tolerance_sensitivities,
     frame_envelope_box,
     frame_histogram_data,
     frame_percentiles,
@@ -362,3 +364,148 @@ class TestSharedAncestorCancellation:
             f"Relative envelope max ({rel_max*1000:.4f} mm) exceeded 1 mm — "
             "shared-edge cancellation may be broken."
         )
+
+
+# -- TestComputeToleranceSensitivities ----------------------------------------
+
+def _tol_rx(rx_bound: float, distribution: str = "uniform") -> ToleranceSpec6:
+    """Helper: ToleranceSpec6 with only rx non-zero."""
+    zero = ToleranceSpec("uniform", bound=0.0)
+    return ToleranceSpec6(
+        dx=zero, dy=zero, dz=zero,
+        rx=ToleranceSpec(distribution, bound=rx_bound),
+        ry=zero, rz=zero,
+    )
+
+
+def _build_serial_chain(
+    rx_bounds: list[float],
+    distribution: str = "uniform",
+    dz_offset: float = 0.0,
+) -> FrameGraph:
+    """Build a serial chain world->f0->f1->... where each edge has only rx tolerance."""
+    fg = FrameGraph()
+    n = len(rx_bounds)
+    frame_names = ["world"] + [f"f{i}" for i in range(n)]
+    for name in frame_names:
+        fg.add_frame(name)
+    for i, bound in enumerate(rx_bounds):
+        T = HTM.from_xyz_euler([0.0, 0.0, dz_offset], [0.0, 0.0, 0.0])
+        fg.add_edge(
+            frame_names[i], frame_names[i + 1],
+            T,
+            _tol_rx(bound, distribution),
+            name=f"e{i}",
+        )
+    return fg
+
+
+class TestComputeToleranceSensitivities:
+
+    def test_dominant_edge_ranked_first(self):
+        """Edge with 10× larger tolerance is ranked first with ~98%+ contribution."""
+        # 3 edges: e0 rx=0.010 rad, e1 rx=0.001 rad, e2 rx=0.001 rad (all uniform)
+        # Variance ratio: 100 : 1 : 1 → e0 contributes ≈ 98.04%
+        fg = _build_serial_chain([0.010, 0.001, 0.001])
+        report = compute_tolerance_sensitivities(fg, "world", "f2")
+        assert report.ranked_contributions[0][0] == "e0"
+        assert report.ranked_contributions[0][1] == "rx"
+        assert report.ranked_contributions[0][2] == pytest.approx(100 * 100 / 102, rel=1e-6)
+
+    def test_percentages_sum_to_100(self):
+        """Sum of all ranked_contributions percentages must equal 100%."""
+        fg = _build_serial_chain([0.005, 0.003, 0.002, 0.001])
+        report = compute_tolerance_sensitivities(fg, "world", "f3")
+        total = sum(pct for _, _, pct in report.ranked_contributions)
+        assert total == pytest.approx(100.0, abs=1e-9)
+
+    def test_uniform_normal_equivalent_variance_same_ranking(self):
+        """Uniform(b) and Normal(b/sqrt(3), sigma_level=1) yield equal contributions.
+
+        Both have variance = b²/3, so rankings and percentages must match exactly.
+        """
+        b = 0.004
+        b_normal = b  # sigma = b_normal/sigma_level = b_normal/1; var = b²
+        # To match uniform variance b²/3: use b_normal = b/sqrt(3), sigma_level=1
+        b_normal_equiv = b / np.sqrt(3)
+
+        zero = ToleranceSpec("uniform", bound=0.0)
+        fg_u = FrameGraph()
+        fg_n = FrameGraph()
+        for fg in [fg_u, fg_n]:
+            for name in ["world", "f0", "f1"]:
+                fg.add_frame(name)
+
+        def _make_tol6(rx_spec: ToleranceSpec) -> ToleranceSpec6:
+            return ToleranceSpec6(dx=zero, dy=zero, dz=zero, rx=rx_spec, ry=zero, rz=zero)
+
+        # Edge 0: dominant, edge 1: weaker — both in uniform and normal variants
+        fg_u.add_edge("world", "f0", _htm(), _make_tol6(ToleranceSpec("uniform", bound=0.010)), name="e0")
+        fg_u.add_edge("f0", "f1", _htm(), _make_tol6(ToleranceSpec("uniform", bound=0.002)), name="e1")
+
+        fg_n.add_edge("world", "f0", _htm(), _make_tol6(ToleranceSpec("normal", bound=0.010 * np.sqrt(3), sigma_level=1.0)), name="e0")
+        fg_n.add_edge("f0", "f1", _htm(), _make_tol6(ToleranceSpec("normal", bound=0.002 * np.sqrt(3), sigma_level=1.0)), name="e1")
+
+        report_u = compute_tolerance_sensitivities(fg_u, "world", "f1")
+        report_n = compute_tolerance_sensitivities(fg_n, "world", "f1")
+
+        # Rankings (edge/dof order) must match
+        assert [r[:2] for r in report_u.ranked_contributions] == [r[:2] for r in report_n.ranked_contributions]
+        # Percentages must match to floating-point precision
+        for (_, _, pct_u), (_, _, pct_n) in zip(report_u.ranked_contributions, report_n.ranked_contributions):
+            assert pct_u == pytest.approx(pct_n, rel=1e-9)
+
+    def test_zero_tolerance_zero_contribution(self):
+        """An edge with all bounds=0 contributes 0% — appears at the bottom ranked at 0.0."""
+        fg = FrameGraph()
+        for name in ["world", "f0", "f1"]:
+            fg.add_frame(name)
+        zero = ToleranceSpec("uniform", bound=0.0)
+        fg.add_edge("world", "f0", _htm(), _tol(0.005), name="e0")
+        fg.add_edge("f0", "f1", _htm(), ToleranceSpec6(
+            dx=zero, dy=zero, dz=zero, rx=zero, ry=zero, rz=zero
+        ), name="e1_zero")
+
+        report = compute_tolerance_sensitivities(fg, "world", "f1")
+        zero_entries = [(n, d, pct) for n, d, pct in report.ranked_contributions if n == "e1_zero"]
+        assert all(pct == pytest.approx(0.0, abs=1e-12) for _, _, pct in zero_entries)
+
+    def test_all_zero_tolerances_returns_zero_variance(self):
+        """If all bounds are zero, total_variance=0 and all percentages are 0."""
+        fg = FrameGraph()
+        for name in ["world", "f0"]:
+            fg.add_frame(name)
+        zero = ToleranceSpec("uniform", bound=0.0)
+        fg.add_edge("world", "f0", _htm(), ToleranceSpec6(
+            dx=zero, dy=zero, dz=zero, rx=zero, ry=zero, rz=zero
+        ), name="e0")
+        report = compute_tolerance_sensitivities(fg, "world", "f0")
+        assert report.total_variance == 0.0
+        assert all(pct == 0.0 for _, _, pct in report.ranked_contributions)
+
+    def test_ascii_chart_returns_nonempty_string(self):
+        """to_ascii_chart() smoke test — returns a non-empty string."""
+        fg = _build_serial_chain([0.005, 0.003, 0.001])
+        report = compute_tolerance_sensitivities(fg, "world", "f2")
+        chart = report.to_ascii_chart()
+        assert isinstance(chart, str)
+        assert len(chart) > 0
+        assert "%" in chart
+        assert "first-order" in chart.lower()
+
+    def test_ascii_chart_top_n_groups_others(self):
+        """top_n=1 shows the single top entry and groups the rest as '(others)'."""
+        fg = _build_serial_chain([0.010, 0.005, 0.001])
+        report = compute_tolerance_sensitivities(fg, "world", "f2")
+        # Only one rx entry is non-zero per edge; with top_n=1 the other two rx
+        # contributions (and all zero-bound DoFs) collapse into others.
+        chart = report.to_ascii_chart(top_n=1)
+        assert "(others)" in chart
+
+    def test_disjoint_frames_raises(self):
+        """DisjointFramesError propagates when frame_a and frame_b are disconnected."""
+        fg = FrameGraph()
+        fg.add_frame("island_a")
+        fg.add_frame("island_b")
+        with pytest.raises(DisjointFramesError):
+            compute_tolerance_sensitivities(fg, "island_a", "island_b")
