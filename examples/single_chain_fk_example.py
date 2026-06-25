@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Single-chain FK example: CNC spindle alignment stack-up.
 
