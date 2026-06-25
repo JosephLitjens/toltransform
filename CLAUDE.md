@@ -60,9 +60,11 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** B-1 — Milestone A is fully complete. Ready to plan B-1.
-- **Last completed task:** A7 — `examples/single_chain_fk_example.py` + `examples/multi_chain_shared_frame_example.py` (commits `3d7936d`, `8232c12`, `178fae0`). Suite: **130 passed, 1 skipped**.
-- **Next task:** Plan and begin **Milestone B-1** (Section 7.2 of the design spec). Read Section 7.2 and Section 9.1 before starting — B-1 has a strict gate: all three Section 9.1 physical validation benchmarks must pass before B-2 can begin.
+- **Current milestone:** B-1.
+- **Last completed task:** B1-2 — `postprocess/bounding_shapes.py` + `tests/test_bounding_shapes.py` (commit `ef4c89c`). Suite: **155 passed, 1 skipped**.
+- **Next task:** B1-3 — Pareto sensitivity engine (`postprocess/stats.py` Steps 8-9, `ParetoSensitivityReport`). Read Section 6.8 of the design spec before starting.
+
+**✅ B1-2 complete (commit `ef4c89c`):** `postprocess/bounding_shapes.py` — 5 public functions (fit_bounding_box, fit_bounding_sphere, fit_bounding_ellipsoid, fit_rotation_cone, fit_rotation_box). Key implementation notes: coverage=1.0 uses uniform-scale approach (scales the covariance-shape ellipsoid uniformly — guarantees enclosure); coverage<1.0 uses chi2.ppf(df=3). Both rotation functions reject (N,4,4) pose arrays. 25 new tests.
 
 **✅ Milestone A complete — all tasks pushed to origin/main:**
 - A1: `core/transforms.py` + `core/conversions.py` — `a31218e` (26 tests)
