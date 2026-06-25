@@ -61,8 +61,10 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
 - **Current milestone:** B-1.
-- **Last completed task:** B1-4 — `postprocess/reporting.py` (commit `e258538`). Suite: **180 passed, 1 skipped**.
-- **Next task:** B1-5 — JSON save/load (`io/schema.py`, `io/serializer.py`). Read Section 6.11 of the design spec before starting.
+- **Last completed task:** B1-5 — `io/schema.py` + `io/serializer.py` (commit `fda4e5c`). Suite: **220 passed, 1 skipped**.
+- **Next task:** B1-6 — Section 9.1 physical validation benchmarks (gates B-2). Read Section 9.1 of the design spec before starting.
+
+**✅ B1-5 complete (commit `fda4e5c`):** `io/schema.py` (7 Pydantic v2 models + discriminated HTMInputModel union + ProjectModel cross-ref validator + frame_graph_to_project_model/project_model_to_frame_graph), `io/serializer.py` (ProjectLoadError + save_project + load_project), root `conftest.py` (importlib workaround for stdlib 'io' frozen-module conflict). 40 new tests (test_schema.py + test_serializer.py).
 
 **✅ B1-4 complete (commit `e258538`):** `postprocess/reporting.py` — 6 public functions (plot_histogram, plot_translation_projection, plot_rotation_summary, plot_pareto_sensitivity, generate_frame_report, generate_sensitivity_report). All return Axes/Figure; callers own show()/savefig(). 2D ellipsoid projection uses covariance-slice + eigh approach. First-order caveat annotation on Pareto chart is mandatory (locked). 17 new smoke tests.
 
