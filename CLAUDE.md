@@ -61,8 +61,10 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
 - **Current milestone:** B-1.
-- **Last completed task:** B1-3 — `ParetoSensitivityReport` + `compute_tolerance_sensitivities()` appended to `postprocess/stats.py` (commit `fd8a08b`). Suite: **163 passed, 1 skipped**.
-- **Next task:** B1-4 — `postprocess/reporting.py` (plotting layer). Read Section 6.10 of the design spec before starting.
+- **Last completed task:** B1-4 — `postprocess/reporting.py` (commit `e258538`). Suite: **180 passed, 1 skipped**.
+- **Next task:** B1-5 — JSON save/load (`io/schema.py`, `io/serializer.py`). Read Section 6.11 of the design spec before starting.
+
+**✅ B1-4 complete (commit `e258538`):** `postprocess/reporting.py` — 6 public functions (plot_histogram, plot_translation_projection, plot_rotation_summary, plot_pareto_sensitivity, generate_frame_report, generate_sensitivity_report). All return Axes/Figure; callers own show()/savefig(). 2D ellipsoid projection uses covariance-slice + eigh approach. First-order caveat annotation on Pareto chart is mandatory (locked). 17 new smoke tests.
 
 **✅ B1-3 complete (commit `fd8a08b`):** `ParetoSensitivityReport` dataclass + `compute_tolerance_sensitivities(frame_graph, frame_a, frame_b)` appended to `postprocess/stats.py`. Uses `compute_sensitivity()` from `core/frame_graph.py` (no re-implementation). Variance formula: uniform→b²/3, normal→(b/k)². `trial_data` omitted from signature (tolerance specs live on `FrameGraph` edges, not `TrialData`). 8 new tests.
 
