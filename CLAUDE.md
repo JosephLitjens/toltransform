@@ -61,8 +61,10 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
 - **Current milestone:** B-1.
-- **Last completed task:** B1-2 — `postprocess/bounding_shapes.py` + `tests/test_bounding_shapes.py` (commit `ef4c89c`). Suite: **155 passed, 1 skipped**.
-- **Next task:** B1-3 — Pareto sensitivity engine (`postprocess/stats.py` Steps 8-9, `ParetoSensitivityReport`). Read Section 6.8 of the design spec before starting.
+- **Last completed task:** B1-3 — `ParetoSensitivityReport` + `compute_tolerance_sensitivities()` appended to `postprocess/stats.py` (commit `fd8a08b`). Suite: **163 passed, 1 skipped**.
+- **Next task:** B1-4 — `postprocess/reporting.py` (plotting layer). Read Section 6.10 of the design spec before starting.
+
+**✅ B1-3 complete (commit `fd8a08b`):** `ParetoSensitivityReport` dataclass + `compute_tolerance_sensitivities(frame_graph, frame_a, frame_b)` appended to `postprocess/stats.py`. Uses `compute_sensitivity()` from `core/frame_graph.py` (no re-implementation). Variance formula: uniform→b²/3, normal→(b/k)². `trial_data` omitted from signature (tolerance specs live on `FrameGraph` edges, not `TrialData`). 8 new tests.
 
 **✅ B1-2 complete (commit `ef4c89c`):** `postprocess/bounding_shapes.py` — 5 public functions (fit_bounding_box, fit_bounding_sphere, fit_bounding_ellipsoid, fit_rotation_cone, fit_rotation_box). Key implementation notes: coverage=1.0 uses uniform-scale approach (scales the covariance-shape ellipsoid uniformly — guarantees enclosure); coverage<1.0 uses chi2.ppf(df=3). Both rotation functions reject (N,4,4) pose arrays. 25 new tests.
 
