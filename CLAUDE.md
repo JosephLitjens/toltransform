@@ -7,10 +7,9 @@ This file is read automatically by Claude Code at the start of every session in 
 1. **Read `docs/design_spec.md` in full.** This is the authoritative design specification, not just a plan — it contains locked architectural decisions, exact module-by-module task breakdowns, interface contracts, and a full changelog of why things are the way they are. Section 6 is the most important section for implementation work: every module has its own subsection with a granular, ordered task list, explicit deliverables, and a depends-on/used-by/public-API interface contract.
 2. **Activate the virtual environment before running any Python command:**
    ```bash
-   source venv/bin/activate   # macOS/Linux
-   # or venv\Scripts\Activate.ps1 on Windows
+   source .venv/bin/activate   # macOS/Linux — NOTE: venv is at .venv/, NOT venv/
    ```
-   If `venv/` doesn't exist yet (e.g., fresh clone), create it first: `python3 -m venv venv`, activate, then `pip install -r requirements.txt`.
+   If `.venv/` doesn't exist yet (e.g., fresh clone), create it first: `python3 -m venv .venv`, activate, then `pip install -r requirements.txt`.
 3. **Check `docs/design_spec.md` Section 11 (Changelog) for the most recent entries** before starting work, in case a decision changed since your last session.
 
 ## Non-negotiable conventions (do not silently deviate from these)
@@ -61,20 +60,31 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** A (in progress)
-- **Last completed task:** A6 — `tests/conftest.py` + `tests/test_integration.py` + `tests/test_allocation.py` placeholder + README (commit `83b8ee3`, 15 new tests, 130 total passed, 1 skipped)
-- **Next task:** A7 — `examples/single_chain_fk_example.py` + `examples/multi_chain_shared_frame_example.py` (Section 6.19)
+- **Current milestone:** A — one task remaining before Milestone A is complete
+- **Last completed task:** A6 — `tests/conftest.py` + `tests/test_integration.py` + `tests/test_allocation.py` placeholder + README (commit `83b8ee3`) + full design spec update (commit `9f5e65f`). Suite: **130 passed, 1 skipped**.
+- **Next task:** **A7** — write `examples/single_chain_fk_example.py` and `examples/multi_chain_shared_frame_example.py` (Section 6.19 of the design spec). No new production modules needed — A7 is purely scripting that demonstrates the already-built A1–A5 stack end-to-end.
 
-**Note on venv:** the venv is at `.venv/` (not `venv/`). Use `source .venv/bin/activate`.
+**A7 scope (Section 6.19 Granular Task List):**
+1. `examples/single_chain_fk_example.py` — 3–4 edge serial chain, mix of uniform+normal tolerances, run `MonteCarloFKEngine`, print envelope via `postprocess/stats.py`. NOTE: `postprocess/reporting.py` (plots) doesn't exist yet — print text output only; do NOT import anything from B-1 modules.
+2. `examples/multi_chain_shared_frame_example.py` — two chains sharing a common upstream Frame (optical-mount scenario), demonstrate `point_pair_envelope_box()` between the two leaf Frames with inline commentary explaining shared-ancestor cancellation.
+3. Each script must run standalone: `python examples/single_chain_fk_example.py` — no GUI, no B-1 dependencies.
+4. After A7 is written and runnable, Milestone A is complete. The next session should **verify Milestone A exit criteria** (Section 7.1) and begin planning Milestone B-1.
 
-**Completed tasks:**
-- A1: `core/transforms.py` + `core/conversions.py` — commit `a31218e` (26 tests)
-- A2: `core/tolerance.py` + `core/sampling.py` — commit `3ac0eed` (21 tests)
-- A3: `core/frame_graph.py` — commit `d81645c` (24 tests); also completes B1-1 (adjoint/compute_sensitivity built here)
-- A4: `sim/monte_carlo_fk.py` — commit `744c562` (18 tests)
-- A5: `postprocess/stats.py` — commit `019eb34` (26 tests); rotation error via scipy Rotation.as_rotvec(); shared-ancestor cancellation test confirms Section 2.4 property
-- A6: `tests/conftest.py` + `tests/test_integration.py` + `tests/test_allocation.py` placeholder — commit `83b8ee3` (15 tests); DEFAULT_ATOL=1e-9, SMALL_ANGLE_ATOL=1e-6; lever-arm coupling and local-frame routing integration tests; Section 9 Item 3 named standalone regression
+**Completed Milestone A tasks (all pushed to origin/main):**
+- A1: `core/transforms.py` + `core/conversions.py` — `a31218e` (26 tests)
+- A2: `core/tolerance.py` + `core/sampling.py` — `3ac0eed` (21 tests)
+- A3: `core/frame_graph.py` — `d81645c` (24 tests); also completes B1-1
+- A4: `sim/monte_carlo_fk.py` — `744c562` (18 tests)
+- A5: `postprocess/stats.py` — `019eb34` (26 tests)
+- A6: `tests/conftest.py` + integration tests + allocation placeholder + README — `83b8ee3` (15 tests)
+- Design spec thorough update — `9f5e65f`
 
-**Two math corrections made in A3 (documented in Section 11 changelog and Section 6.3 task list):**
+**Two math corrections made in A3 (documented in Section 11 changelog and Section 6.3):**
 - Adjoint formula: `[[R, skew(t)@R],[0,R]]` — NOT `[[R,0],[skew(t)@R,R]]`
 - Sensitivity formula: `J_i = Ad_{T_{frame_a→exit_i}}` — NOT `Ad_{T_{exit→frame_b}}`
+
+**Key implementation details a new session needs to know:**
+- `postprocess/stats.py` Steps 8–9 (Pareto sensitivity, `ParetoSensitivityReport`) are NOT implemented — deferred to B1-3. Do not reference them in A7 examples.
+- `postprocess/reporting.py` does NOT exist yet (B1-4). A7 examples must print text, not plots.
+- `postprocess/bounding_shapes.py` does NOT exist yet (B1-2). Do not use it in A7.
+- `sim/allocation.py` does NOT exist yet (B-2). Do not use it in A7.
