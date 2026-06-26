@@ -60,9 +60,11 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** B-1.
-- **Last completed task:** B1-6 — Physical Validation Test Suite (commit `aacd210`). Suite: **223 passed, 1 skipped**. **B-1 gating criteria met — B-2 is now unblocked.**
-- **Next task:** B1-7 — Example scripts demonstrating Pareto sensitivity, component selection, mitigation verification (Section 6.19 / 1.4).
+- **Current milestone:** B-1 ✅ COMPLETE — all 7 tasks done. Next milestone: **B-2** (inverse allocation).
+- **Last completed task:** B1-7 — Pareto sensitivity example script (commit `04b5b05`). Suite: **223 passed, 1 skipped**.
+- **Next task:** B2-1 — Start `sim/allocation.py` inverse allocator (Section 6.7).
+
+**✅ B1-7 complete (commit `04b5b05`):** `examples/pareto_sensitivity_example.py` — standalone example demonstrating all three Section 1.4 use cases: Sensitivity Pinpointing (Pareto breakdown via `compute_tolerance_sensitivities` + `to_ascii_chart()`), Component Selection (upgrade shoulder joint from ±3 mrad to ±1 mrad, compare Pareto rankings), Reporting (save frame report + 2 Pareto charts as PNG via `generate_frame_report` / `generate_sensitivity_report`). No new tests — example scripts only. **Milestone B-1 fully complete.**
 
 **✅ B1-6 complete (commit `aacd210`):** `tests/test_physical_validation.py` — 3 module-level named regression tests:
 - `test_rss_linear_stack_up`: 5-link normal-distribution translation chain; output variance matches classical RSS formula within quantified 5-SE sampling bound. 
@@ -90,8 +92,8 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 - Adjoint formula: `[[R, skew(t)@R],[0,R]]` — NOT `[[R,0],[skew(t)@R,R]]`
 - Sensitivity formula: `J_i = Ad_{T_{frame_a→exit_i}}` — NOT `Ad_{T_{exit→frame_b}}`
 
-**Key facts for the next session (B1-7 / B-2 start):**
-- B1-7 (example scripts) is the only remaining B-1 task before the milestone is fully declared done.
-- B-2 is unblocked (all three Section 9.1 benchmarks pass).
-- `sim/allocation.py` does NOT exist yet — B-2 scope. Start only after B1-7 is done (or in parallel if agreed).
-- The design spec and docs/design_spec.md Section 7.2 still show B1-6 as "Pending" — update those after pushing commit `aacd210`.
+**Key facts for the next session (B-2 start):**
+- B-2 is fully unblocked. All three Section 9.1 benchmarks pass; B1-7 is done.
+- `sim/allocation.py` does NOT exist yet — this is the primary B-2 deliverable.
+- Commits `aacd210` (B1-6), `0abc4b1` (CLAUDE.md post-B1-6), and `04b5b05` (B1-7) may still be unpushed — run `git log origin/main..HEAD` and push before starting B-2.
+- `docs/design_spec.md` Section 7.2 still shows B1-6 and B1-7 as "Pending" — update those and add changelog entries (Section 11) before or as part of the B-2 kickoff session.

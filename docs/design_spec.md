@@ -233,6 +233,10 @@ After any Monte Carlo run (FK or the validation step of IK), the user may select
 
 ```
 toltransform/
+├── conftest.py             # Root pytest session setup: pre-loads io.schema + io.serializer into
+│                           #   sys.modules to work around the stdlib 'io' frozen-module name collision
+│                           #   (Python's FrozenImporter resolves 'io' before PathFinder reaches our io/
+│                           #   package — standard sys.path manipulation cannot override frozen modules)
 ├── core/
 │   ├── transforms.py       # HTM class; canonical 4x4 storage; conversions via pytransform3d
 │   ├── tolerance.py        # ToleranceSpec (per-DoF), sampling, perturbation composition
@@ -695,7 +699,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.8 `postprocess/stats.py`
 
-*(Last revised: 2026-06-24 — Claude, design-spec update adding the Pareto sensitivity breakdown per Mod 2, cross-review; **Steps 1–7 implemented in A5, commit `019eb34`, 26 tests passing. Steps 8–9 deferred to Milestone B-1 task B1-3.** Rotation-error extraction decision: `scipy.spatial.transform.Rotation.from_matrix(R_error).as_rotvec()` — exact matrix logarithm, equivalent to skew-extraction at small angles but more robust at moderate angles; documented in module docstring.)*
+*(Last revised: 2026-06-25 — Claude, B1-3 implementation; **Steps 1–7 implemented in A5, commit `019eb34`, 26 tests passing. Steps 8–9 implemented in B1-3, commit `fd8a08b`, 8 new tests added to `tests/test_stats.py`.** Rotation-error extraction decision: `scipy.spatial.transform.Rotation.from_matrix(R_error).as_rotvec()` — exact matrix logarithm, equivalent to skew-extraction at small angles but more robust at moderate angles; documented in module docstring.)*
 
 **Responsibility:** Computes envelope statistics for any single Frame, and for the relative pose between any two Frames in the same component, directly from a `TrialData` instance — no re-simulation, no graph traversal beyond a same-component validation check. **As of this revision, also computes the Pareto-sorted per-edge sensitivity breakdown** (Mod 2) — answering "which tolerance edge dominates this error budget" as a standalone forward-analysis capability, independent of whether inverse allocation is ever run.
 
@@ -707,10 +711,10 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - `pose_error_vector_batch()` — the shared extraction primitive producing `(N,6)` error vectors in `[dx,dy,dz,rx,ry,rz]` order with rotvec `ω=θu` rotation columns compatible with `postprocess/bounding_shapes.py`
 - `tests/test_stats.py` — 26 tests, including shared-ancestor cancellation integration check
 
-**B1-3 scope (Steps 8–9) — Deferred to Milestone B-1:**
-- `compute_tolerance_sensitivities()` — Pareto-sorted percentage-contribution breakdown per edge/DoF, built on the shared `compute_sensitivity()` primitive relocated to `core/frame_graph.py` (Section 6.3)
-- `ParetoSensitivityReport` dataclass + `to_ascii_chart()` rendering hook
-- Pareto breakdown correctness tests (to be added to `tests/test_stats.py` in B1-3)
+**B1-3 scope (Steps 8–9) — ✅ Implemented (commit `fd8a08b`, 8 new tests in `tests/test_stats.py`):**
+- `compute_tolerance_sensitivities(frame_graph, frame_a, frame_b) -> ParetoSensitivityReport` — Pareto-sorted percentage-contribution breakdown per edge/DoF
+- `ParetoSensitivityReport` dataclass + `to_ascii_chart(top_n=10) -> str` rendering hook
+- **Key decisions:** `trial_data` omitted (tolerance specs live on `FrameGraph.edges[name].tolerance`, not on `TrialData`); variance formula `uniform → b²/3`, `normal → (b/sigma_level)²`; percentage contribution summed unweighted across all 6 output DoF; first-order caveat mandatory as on-chart annotation in `postprocess/reporting.py` (not just prose)
 
 **Granular Task List:**
 
@@ -723,21 +727,21 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
    - Compute `inverse(trial_data.frame_poses[frame_a][i]) @ trial_data.frame_poses[frame_b][i]` for every trial `i`, vectorized (batched inverse + batched matmul, no Python loop).
 6. Implement `relative_pose_nominal(trial_data, frame_a, frame_b) -> np.ndarray` shape `(4,4)`: same as Step 5 but using `trial_data.nominal_poses`, for use as the reference point in error-vector extraction.
 7. Implement `point_pair_envelope_box(trial_data, frame_graph, frame_a, frame_b) -> dict`: combines Steps 1, 5, and 6 to produce the same kind of per-DoF min/max box as Step 2, but for the *relative* pose between two arbitrary Frames — this is the function that directly satisfies the cross-chain optical-alignment use case (Section 3.3).
-8. **[DEFERRED TO B1-3] New this revision (Mod 2, cross-review) — `compute_tolerance_sensitivities(frame_graph, frame_a, frame_b) -> ParetoSensitivityReport`:** computes the first-order percentage contribution of each toleranced edge/DoF on the path between `frame_a` and `frame_b` to the total variance of the target relative pose.
-   - Use `frame_graph.path_edges_between(frame_a, frame_b)` (Section 6.3, Step 12) to get the relevant edges, and `compute_sensitivity(frame_graph, frame_a, frame_b, edge_names)` (Section 6.3, Step 13) to get the shared `(6, 6*len(edges))` sensitivity matrix — **do not implement a second copy of the Jacobian here; this is the entire point of the Mod 2 relocation.**
-   - For each edge's each DoF, compute its variance contribution as `(sensitivity_block_column)² * variance(DoF)`, where `variance(DoF)` is `bound²/3` for `"uniform"` tolerances and `sigma²` (`= (bound/sigma_level)²`) for `"normal"` tolerances — both reduce consistently to the same variance-propagation math, which is also what the RSS benchmark in Section 9.1 validates against.
-   - Sum each edge/DoF's variance contribution across all 6 output DoF (weighted by which output DoF the user actually cares about, or summed unweighted across all 6 if no specific weighting is given — **decide and document the exact weighting scheme once this task is reached**), normalize by the total variance, and sort descending — this produces the Pareto breakdown.
-   - Return a `ParetoSensitivityReport` dataclass: an ordered list of `(edge_name, dof_label, percentage_contribution)` tuples, plus the total variance they sum to, ready for direct display as the Pareto chart shown in Mod 2's example output (`Stage_X_Tilt (rx) 45.2%`, etc.) or for `postprocess/reporting.py` to render as a horizontal bar chart.
-   - **Document explicitly, next to this function's docstring and in any rendered report:** this is a **first-order linear approximation** (the same small-angle adjoint Jacobian used by `sim/allocation.py`'s baseline allocation, Section 6.7). For chains with significant geometric leverage (`dx ≈ L·θ`, the same nonlinearity that motivates the allocation engine's damping loop), the true nonlinear variance contribution of a given edge can differ from this linear estimate — this caveat must not be silently omitted, since a Pareto chart that looks authoritative but is quietly approximate could mislead a sourcing decision (Section 1.4).
-9. **[DEFERRED TO B1-3]** Implement `ParetoSensitivityReport`'s rendering hook (a `to_ascii_chart()` or similar convenience method) that produces the bar-chart-style text output shown in Mod 2 — useful for quick terminal/script output in Milestone B-1's example scripts (Section 6.19) ahead of any GUI rendering.
+8. ✅ **Done (B1-3, `fd8a08b`)** Implement `compute_tolerance_sensitivities(frame_graph, frame_a, frame_b) -> ParetoSensitivityReport`: computes the first-order percentage contribution of each toleranced edge/DoF on the path between `frame_a` and `frame_b` to the total variance of the target relative pose.
+   - Uses `frame_graph.path_edges_between(frame_a, frame_b)` and `compute_sensitivity(...)` from `core/frame_graph.py` — no second Jacobian implementation.
+   - **Variance formula (locked):** `uniform → b²/3`, `normal → (b/sigma_level)²` — consistent with the RSS benchmark (Section 9.1.1).
+   - **Weighting (locked):** percentage contribution summed **unweighted across all 6 output DoF** — total output variance is the scalar sum of all 6 DoF variance contributions from all edges.
+   - Returns `ParetoSensitivityReport` dataclass: `ranked_contributions: list[tuple[str, str, float]]` (edge_name, dof_label, pct), `total_variance: float`.
+   - First-order-linear-approximation caveat documented in the function's docstring AND as a mandatory on-chart annotation in `postprocess/reporting.py` (Section 6.10 Step 4 — locked there, cannot be suppressed).
+9. ✅ **Done (B1-3, `fd8a08b`)** Implement `ParetoSensitivityReport.to_ascii_chart(top_n=10) -> str`: bar-chart-style text output for quick terminal/script use. Groups contributions beyond `top_n` into a single "(others)" entry.
 10. Write `tests/test_stats.py` — **A5 tests ✅ implemented (26 tests); B1-3 Pareto tests deferred:**
    - ✅ Construct a small synthetic `TrialData` with known, hand-computed pose errors (don't run the full MC engine — directly build the `TrialData` fields) and confirm `frame_envelope_box` returns the expected min/max.
    - ✅ Confirm `relative_pose_trials` between a Frame and itself returns identity for every trial (trivial sanity check).
    - ✅ Confirm `point_pair_envelope_box` between two Frames sharing a common upstream edge correctly reflects that the shared edge's contribution cancels out of the *relative* error (a key qualitative check that validates the whole point of Section 2.4's shared-sampling design — relative tolerance between two downstream points should be tighter than either point's absolute tolerance when they share a noisy common ancestor edge).
    - ✅ Confirm the different-component case raises a clear error.
-   - **[DEFERRED TO B1-3] Pareto sensitivity correctness (new, Mod 2):** construct a simple chain with one dominant-tolerance edge and several much-tighter edges, confirm `compute_tolerance_sensitivities()` ranks the dominant edge first with a percentage contribution that matches a hand-computed variance ratio.
-   - **[DEFERRED TO B1-3] Pareto contributions sum to ~100%:** confirm the reported percentages across all edge/DoF entries sum to approximately 100% (allowing for the "Others" bucketing shown in Mod 2's example output, if implemented) for a representative chain.
-   - **[DEFERRED TO B1-3] Uniform vs. normal consistency:** confirm the variance formula (`bound²/3` for uniform, `sigma²` for normal) produces self-consistent Pareto rankings when the same chain is run once with all-uniform and once with all-normal tolerances at equivalent variance — this is the same consistency the RSS benchmark (Section 9.1) checks at the FK level, applied here at the sensitivity-breakdown level.
+   - ✅ **Done (B1-3, `fd8a08b`) Pareto sensitivity correctness:** construct a simple chain with one dominant-tolerance edge and several much-tighter edges, confirm `compute_tolerance_sensitivities()` ranks the dominant edge first with a percentage contribution that matches a hand-computed variance ratio.
+   - ✅ **Done (B1-3, `fd8a08b`) Pareto contributions sum to ~100%:** confirmed the reported percentages across all edge/DoF entries sum to approximately 100% for a representative chain.
+   - ✅ **Done (B1-3, `fd8a08b`) Uniform vs. normal consistency:** confirmed the variance formula (`bound²/3` for uniform, `sigma²` for normal) produces self-consistent Pareto rankings when the same chain is run with all-uniform and all-normal tolerances at equivalent variance.
 
 **Interfaces:**
 
@@ -760,7 +764,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.9 `postprocess/bounding_shapes.py`
 
-*(Last revised: 2026-06-23 — Claude, design-spec update hardening the rotation-vector type contract per cross-review)*
+*(Last revised: 2026-06-25 — Claude, B1-2 implementation, commit `ef4c89c`, 25 tests passing. Original spec note: design-spec update hardening the rotation-vector type contract per cross-review.)*
 
 **Responsibility:** Fits bounding shapes (box, ellipsoid/sphere for translation; cone or per-axis box for rotation) to the error-vector point clouds produced by `postprocess/stats.py`. This is the module responsible for the "bounding shape the engineer can use to make decisions" deliverable (Section 1.1, Section 3.1).
 
@@ -773,19 +777,20 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Granular Task List:**
 
-1. Implement `fit_bounding_sphere(points: np.ndarray) -> dict(center, radius)` for a `(N,3)` translation point cloud — minimum enclosing sphere (e.g., Welzl's algorithm, or a simpler/conservative approach such as centroid + max distance, which is non-optimal but simple and always-correct as a bound — **recommend the simpler conservative approach for v1**, since this is an error-budgeting tool, not a computational-geometry showcase, and a slightly loose conservative bound is preferable to added complexity/risk of an exact-minimum-enclosing-sphere implementation bug).
-2. Implement `fit_bounding_ellipsoid(points: np.ndarray, coverage=1.0) -> dict(center, axes_lengths, axes_directions)`: for `coverage=1.0` (full worst-case), fit via the covariance-matrix/eigenvalue approach scaled to just enclose all points; for `coverage<1.0` (e.g., 0.997 for a 3σ-equivalent statistical ellipsoid), scale using the appropriate chi-squared quantile for 3 degrees of freedom. Document this distinction clearly, since "ellipsoid that bounds 100% of points" and "ellipsoid that bounds 99.7% of points statistically" are different objects answering different questions (worst-case vs. statistical, per Section 2.5).
-3. **Rotation bounding shape — locked decision (2026-06-23): the cone is the lead representation.** Implement both of the following, but treat the cone as the primary reported value everywhere a single number/shape is needed (e.g., a results-viewer headline figure, a one-line summary in a report) — the box remains available as a secondary, more granular cross-check:
-   - `fit_rotation_cone(rotvecs: np.ndarray) -> dict(max_angle, mean_axis)` — **primary.** Single worst-case tilt-angle-from-nominal magnitude, regardless of direction, plus the mean tilt axis for reference. This is the number an engineer reads first when asking "how far off-axis could this interface tip?"
-   - `fit_rotation_box(rotvecs: np.ndarray) -> dict(min, max)` — **secondary.** Simple per-axis worst-case bounds (3 independent angle bounds), kept available for cases where the *direction* of angular error matters (e.g., pitch is much more sensitive than yaw for a given optical system) and a single isotropic cone magnitude would obscure that asymmetry.
-4. **Interface type-hardening (locked decision, this revision):** `fit_rotation_cone()` and `fit_rotation_box()` must be explicitly typed and documented to accept **only** pre-extracted small-angle rotation-vector arrays — `rotvecs: np.ndarray` of shape `(N,3)`, where each row is the axis-scaled-by-angle vector **ω = θu** (`u` the unit rotation axis, `θ` the small rotation angle; this is exactly what `postprocess/stats.py`'s `pose_error_vector_batch()`, Section 6.8 Step 1, already produces as the rotation half of its `(N,6)` output). Document this convention by name (`ω = θu`) in both functions' docstrings, not just by shape/dtype.
-   - These two functions must **never** accept a raw `(N,4,4)` HTM/pose array directly, and must not internally re-derive a rotation vector from one — doing so would risk reintroducing multi-axis coordinate-coupling artifacts (e.g., naively reading off individual matrix entries as if they were independent per-axis angles) that the dedicated small-angle log-map extraction in `postprocess/stats.py` is specifically designed to avoid. Enforce this with a type hint and a runtime shape check (`assert rotvecs.shape[1] == 3`, raising a clear error on a `(N,4,4)` array passed by mistake) rather than relying on the type hint alone.
-5. Implement `fit_bounding_box(points: np.ndarray) -> dict(min, max)`: thin, explicit axis-aligned box fit (kept here for symmetry with the ellipsoid/cone fitters, even though `postprocess/stats.py`'s `frame_envelope_box` already effectively computes this for the 6-DoF case — this version operates on arbitrary 3D point clouds for reuse by both translation and rotation-box fits).
-6. Write `tests/test_bounding_shapes.py`:
-   - Synthetic point cloud with a known, constructed bounding sphere/ellipsoid (e.g., points placed exactly on a known ellipsoid surface) — confirm the fitted shape matches within numerical tolerance.
-   - Confirm the `coverage<1.0` statistical ellipsoid is strictly smaller than the `coverage=1.0` worst-case ellipsoid for the same point cloud (sanity check on the chi-squared scaling).
-   - Confirm `fit_rotation_box` and `fit_rotation_cone` agree on simple, symmetric synthetic cases (e.g., isotropic rotation-vector noise) where both representations should imply the same effective bound — this remains a useful cross-check even with the cone as the lead representation, since it catches a fitting bug in either function.
-   - **Type-hardening test (new, locked decision):** confirm passing a `(N,4,4)` array to `fit_rotation_cone()`/`fit_rotation_box()` raises a clear shape-mismatch error rather than silently proceeding with misinterpreted data.
+1. ✅ **Done (B1-2, `ef4c89c`)** Implement `fit_bounding_sphere(points: np.ndarray) -> dict(center, radius)`. **Implementation decision (locked):** uses centroid + max distance — `center = np.mean(pts, axis=0)`, `radius = max(||p_i - center||)`. Not the minimum enclosing sphere, but a simpler, always-correct conservative bound; appropriate for an error-budgeting tool. Documented in the function's docstring.
+2. ✅ **Done (B1-2, `ef4c89c`)** Implement `fit_bounding_ellipsoid(points: np.ndarray, coverage=1.0) -> dict(center, axes_lengths, axes_directions)`. **Critical implementation decision (locked):** for `coverage=1.0`, **per-axis independent max projection does NOT guarantee enclosure** (a point far along two PCA axes simultaneously can escape). Fix: **uniform-scale approach** — compute each point's Mahalanobis distance `r²_i = Σ_j (projection_ij / sigma_j)²`, then scale all PCA axes uniformly by `sqrt(max(r²_i))`. Enclosure is guaranteed by construction (the scaled ellipsoid is the minimum Mahalanobis-distance sphere containing all points). For `coverage<1.0`: scale by `sqrt(chi2.ppf(coverage, df=3))`.
+3. ✅ **Done (B1-2, `ef4c89c`)** Rotation bounding shapes — cone (lead) and box (secondary):
+   - `fit_rotation_cone(rotvecs: np.ndarray) -> dict(max_angle, mean_axis)` — **primary.** `max_angle = max(||rotvec_i||)`. `mean_axis` = normalized mean direction; falls back to `[0, 0, 1]` if all magnitudes are zero (avoids NaN).
+   - `fit_rotation_box(rotvecs: np.ndarray) -> dict(min, max)` — **secondary.** Delegates to `fit_bounding_box()` after the shape check — no separate implementation.
+4. ✅ **Done (B1-2, `ef4c89c`)** Interface type-hardening: `_check_rotvec_shape(rotvecs)` private helper raises `ValueError` with a clear message if `rotvecs.shape` is `(N,4,4)` (or anything other than `(N,3)`). Called at entry to both `fit_rotation_cone()` and `fit_rotation_box()`. Convention `ω = θu` documented by name in both docstrings.
+5. ✅ **Done (B1-2, `ef4c89c`)** Implement `fit_bounding_box(points: np.ndarray) -> dict(min, max)`: `{"min": points.min(axis=0), "max": points.max(axis=0)}`. Operates on arbitrary 3D point clouds; reused by `fit_rotation_box()`.
+6. ✅ **Done (B1-2, `ef4c89c`)** `tests/test_bounding_shapes.py`: 25 tests, 6 test classes:
+   - `TestFitBoundingBox`: axis-aligned bounds on known synthetic data
+   - `TestFitBoundingSphere`: centroid+max distance enclosure check, single-point degenerate case
+   - `TestFitBoundingEllipsoid`: coverage=1.0 uniform-scale enclosure guarantee (the key invariant), coverage<1.0 strictly smaller, near-degenerate cases
+   - `TestFitRotationCone`: correct max_angle, mean_axis normalization, zero-magnitude fallback
+   - `TestFitRotationBox`: delegates to fit_bounding_box, bounds correct
+   - `TestTypeHardening`: confirms `(N,4,4)` input raises `ValueError` for both `fit_rotation_cone` and `fit_rotation_box`
 
 **Interfaces:**
 
@@ -805,7 +810,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.10 `postprocess/reporting.py`
 
-*(Last revised: 2026-06-23 — Claude, design-spec update adding Pareto sensitivity chart rendering per Mod 2, cross-review)*
+*(Last revised: 2026-06-25 — Claude, B1-4 implementation, commit `e258538`, 17 smoke tests. Original spec note: design-spec update adding Pareto sensitivity chart rendering per Mod 2, cross-review.)*
 
 **Responsibility:** Generates Matplotlib plots from the statistics (`postprocess/stats.py`) and fitted shapes (`postprocess/bounding_shapes.py`): per-DoF histograms, 2D projections of bounding shapes, and **as of this revision, the Pareto sensitivity breakdown chart** (Mod 2), per the locked decision to use 2D projections rather than a rotatable 3D viewer (Section 8).
 
@@ -819,13 +824,24 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Granular Task List:**
 
-1. Implement `plot_histogram(counts, bin_edges, dof_label, ax=None) -> matplotlib.axes.Axes`: single-DoF histogram, returns the Axes so callers (GUI or examples scripts) can embed or further customize it rather than this function owning figure-level layout decisions.
-2. Implement `plot_translation_projection(points: np.ndarray, bounding_shape: dict, plane: Literal["xy","xz","yz"], ax=None) -> matplotlib.axes.Axes`: scatter the trial point cloud (or a representative subsample if `N` is large — define a practical subsampling cutoff, e.g., 2000 points, to keep plots legible and fast) projected onto the requested plane, overlay the bounding box/ellipse outline for that projection.
-3. Implement `plot_rotation_summary(rotvecs: np.ndarray, cone: dict, box: dict, ax=None) -> matplotlib.axes.Axes`: a combined view with the cone (locked 2026-06-23 as the lead representation, per Section 6.9 Step 3) drawn as the prominent primary element — e.g., a shaded cone/circle at `max_angle` with the `mean_axis` marked — and the per-axis box rendered as a smaller, secondary annotation (e.g., three thin tick marks or a corner inset) rather than as a co-equal visual.
-4. **New this revision (Mod 2) — implement `plot_pareto_sensitivity(report: ParetoSensitivityReport, ax=None, top_n=10) -> matplotlib.axes.Axes`:** a horizontal bar chart of the `top_n` ranked edge/DoF contributions (descending), with any remaining contributions grouped into a single "Others" bar — matching the example layout in Mod 2's directive. Must visibly include the first-order-linear-approximation caveat from Section 6.8 Step 8 as an annotation or caption on the chart itself, not just in surrounding prose, since this chart is the one most likely to be screenshotted/shared standalone in a sourcing discussion (Section 1.4) where the caveat could otherwise get lost.
-5. Implement a top-level convenience function `generate_frame_report(trial_data, frame_name) -> matplotlib.figure.Figure`: assembles a multi-panel figure (3 translation histograms + 3 rotation histograms + 2–3 translation projections + 1 rotation summary) for a single Frame in one call — this is what `examples/` scripts and eventually the GUI results viewer will call most often.
-6. Implement `generate_sensitivity_report(report: ParetoSensitivityReport) -> matplotlib.figure.Figure`: a standalone single-panel figure wrapping Step 4's `plot_pareto_sensitivity()` — kept separate from `generate_frame_report()` since the sensitivity breakdown is queried per point-pair target, not per Frame, and is a distinct enough deliverable (per Section 1.4's "Sensitivity Pinpointing" use case) to warrant its own report-generation entry point.
-7. Write `tests/test_reporting.py` as smoke tests: confirm each plotting function runs without raising on representative synthetic data and returns a valid `Axes`/`Figure` object — do not attempt to assert on pixel content; visual correctness is a human-review concern, not an automated-test concern.
+1. ✅ **Done (B1-4, `e258538`)** Implement `plot_histogram(counts, bin_edges, dof_label, ax=None) -> matplotlib.axes.Axes`: single-DoF histogram, returns the Axes.
+2. ✅ **Done (B1-4, `e258538`)** Implement `plot_translation_projection(points: np.ndarray, bounding_shape: dict, plane: Literal["xy","xz","yz"], ax=None) -> matplotlib.axes.Axes`. **Implementation note:** scatter uses private `_maybe_subsample(pts, rng)` helper with `_SCATTER_MAX_POINTS = 2000`; 2D ellipsoid projection uses covariance-slice + `eigh`:
+   ```python
+   C_3d = V @ np.diag(axes_lengths**2) @ V.T
+   C_2d = C_3d[np.ix_([ai, aj], [ai, aj])]       # 2×2 sub-matrix for the plane
+   evals, evecs = np.linalg.eigh(C_2d)             # ascending eigenvalues
+   angle = np.degrees(np.arctan2(evecs[1,1], evecs[0,1]))
+   patch = Ellipse(center_2d, width=2*np.sqrt(evals[1]), height=2*np.sqrt(evals[0]), angle=angle)
+   ```
+3. ✅ **Done (B1-4, `e258538`)** Implement `plot_rotation_summary(rotvecs: np.ndarray, cone: dict, box: dict, ax=None) -> matplotlib.axes.Axes`: cone drawn as prominent shaded circle at `max_angle`, mean_axis marked; box rendered as secondary annotation.
+4. ✅ **Done (B1-4, `e258538`)** Implement `plot_pareto_sensitivity(report: ParetoSensitivityReport, ax=None, top_n=10) -> matplotlib.axes.Axes`. **Locked decision:** first-order-linear-approximation caveat is **hardcoded as a mandatory `ax.annotate()`** on the chart — cannot be suppressed without editing source. Annotation text: `"* First-order linear approximation via small-angle adjoint Jacobian.\n  Nonlinear contributions may differ for high-leverage chains."` at `(0.01, 0.01)` in axes fraction. Justified by Section 1.4 sourcing-discussion use case.
+5. ✅ **Done (B1-4, `e258538`)** Implement `generate_frame_report(trial_data, frame_name) -> matplotlib.figure.Figure`. **Layout (locked):** 4×3 GridSpec:
+   - Row 0: `hist(dx)` | `hist(dy)` | `hist(dz)`
+   - Row 1: `proj(xy)` | `proj(xz)` | `proj(yz)`
+   - Row 2: `hist(rx)` | `hist(ry)` | `hist(rz)`
+   - Row 3: rotation summary spanning all 3 columns (`gs[3, :]`)
+6. ✅ **Done (B1-4, `e258538`)** Implement `generate_sensitivity_report(report: ParetoSensitivityReport) -> matplotlib.figure.Figure`: single-panel figure wrapping `plot_pareto_sensitivity()`.
+7. ✅ **Done (B1-4, `e258538`)** `tests/test_reporting.py`: 17 smoke tests. **Critical:** `import matplotlib; matplotlib.use("Agg")` must be the **first import** in the file — before any other matplotlib import — to prevent headless display errors in CI. All 6 public functions confirmed to return valid `Axes`/`Figure` without raising.
 
 **Interfaces:**
 
@@ -845,7 +861,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.11 `io/schema.py`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+*(Last revised: 2026-06-25 — Claude, B1-5 implementation, commit `fda4e5c`, 24 tests in `tests/test_schema.py`.)*
 
 **Responsibility:** Pydantic models defining the on-disk project data model — the only interface the GUI is permitted to read from or write to (Section 5.3).
 
@@ -857,21 +873,29 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Granular Task List:**
 
-1. Implement `ToleranceSpecModel` (Pydantic): mirrors `core/tolerance.py`'s `ToleranceSpec` fields with Pydantic-level validation (`bound >= 0`, `distribution` as a `Literal["uniform","normal"]`).
-2. Implement `ToleranceSpec6Model`: six `ToleranceSpecModel` fields, named `dx, dy, dz, rx, ry, rz` for on-disk readability (rather than an unlabeled list — a human or future tool opening the raw JSON should be able to read it directly).
-3. Implement `HTMInputModel`: a tagged union (Pydantic discriminated union) covering all four input representations (`xyz_euler`, `matrix`, `quaternion`, `screw`) — this is what preserves the "original input representation" metadata from `core/transforms.py`'s `HTM` (Section 6.1) on disk, so reloading a project shows the user's original entry format, not a canonicalized matrix.
-4. Implement `HTMEdgeModel`: `name`, `parent`, `child`, `nominal: HTMInputModel`, `tolerance: ToleranceSpec6Model`.
-5. Implement `FrameModel`: `name`, optional `metadata: dict`.
-6. Implement `SimSettingsModel`: `mode: Literal["fk_verification","ik_allocation"]`, `n_trials: int`, `seed: int`, `default_distribution: Literal["uniform","normal"]`, `default_sigma_level: float`.
-7. Implement `SavedAnalysisModel`: persisted point-pair analysis definitions (Section 3.3) — `name`, `frame_a`, `frame_b`, optionally a cached last-run result summary.
-8. Implement `ProjectModel`: top-level container — `frames: list[FrameModel]`, `edges: list[HTMEdgeModel]`, `sim_settings: SimSettingsModel`, `saved_analyses: list[SavedAnalysisModel]`.
-9. Implement `ProjectModel.validate_references()` (a Pydantic model validator, not just field validators): confirm every edge's `parent`/`child` refers to a declared Frame, and every `SavedAnalysisModel`'s `frame_a`/`frame_b` refers to declared Frames — catch dangling references at schema-validation time, before a `FrameGraph` is ever constructed from this data (Section 6.3's `validate_dag()` catches *topological* errors; this catches *referential* errors one layer earlier).
-10. Implement `project_model_to_frame_graph(project: ProjectModel) -> FrameGraph`: constructs a live `core/frame_graph.py` `FrameGraph` from a validated `ProjectModel`, using `core/transforms.py`'s constructors to rebuild each `HTM` from its tagged `HTMInputModel` representation.
-11. Implement `frame_graph_to_project_model(frame_graph: FrameGraph, sim_settings, saved_analyses) -> ProjectModel`: the inverse — used when saving.
-12. Write `tests/test_schema.py`:
-    - Round-trip test: build a `FrameGraph` directly in Python, convert to `ProjectModel`, back to `FrameGraph`, confirm the result is equivalent (same Frames, edges, nominal transforms within tolerance, same tolerance specs).
-    - Dangling-reference test: construct a `ProjectModel` with an edge referencing a non-existent Frame, confirm `validate_references()` raises with a specific, actionable message naming the bad reference.
-    - Input-representation round-trip: confirm a Frame originally entered via, e.g., screw coordinates is still tagged as `screw` after a save/load round-trip (not silently canonicalized to `matrix`).
+1. ✅ **Done (B1-5, `fda4e5c`)** Implement `ToleranceSpecModel`: `distribution: Literal["uniform","normal"]`, `bound: float`, `sigma_level: float = 3.0`, `locked: bool = False`. `@field_validator("bound")` asserts `bound >= 0`.
+2. ✅ **Done (B1-5, `fda4e5c`)** Implement `ToleranceSpec6Model`: six `ToleranceSpecModel` fields named `dx, dy, dz, rx, ry, rz`.
+3. ✅ **Done (B1-5, `fda4e5c`)** Implement `HTMInputModel` as a Pydantic v2 discriminated union via `kind: Literal[...]` field:
+   ```python
+   HTMInputModel = Annotated[
+       Union[HTMInputXyzEuler, HTMInputMatrix, HTMInputQuaternion, HTMInputScrew],
+       Field(discriminator="kind"),
+   ]
+   ```
+   HTMs without `input_representation` (e.g., composed transforms) fall back to `kind="matrix"`. All numpy arrays stored as Python lists (`.tolist()`) in JSON; reconstructed to numpy arrays on load. `HTMInputScrew` has `point_on_axis: list[float] | None = None`.
+4. ✅ **Done (B1-5, `fda4e5c`)** Implement `HTMEdgeModel`: `name`, `parent`, `child`, `nominal: HTMInputModel`, `tolerance: ToleranceSpec6Model`.
+5. ✅ **Done (B1-5, `fda4e5c`)** Implement `FrameModel`: `name: str`, `metadata: dict = Field(default_factory=dict)`.
+6. ✅ **Done (B1-5, `fda4e5c`)** Implement `SimSettingsModel`: `mode: Literal["fk_verification","ik_allocation"]`, `n_trials: int`, `seed: int`. (`default_distribution` and `default_sigma_level` omitted as they are not used by the engine — YAGNI.)
+7. ✅ **Done (B1-5, `fda4e5c`)** Implement `SavedAnalysisModel`: `name: str`, `frame_a: str`, `frame_b: str`.
+8. ✅ **Done (B1-5, `fda4e5c`)** Implement `ProjectModel`: `schema_version: int = 1`, `frames: list[FrameModel]`, `edges: list[HTMEdgeModel]`, `sim_settings: SimSettingsModel`, `saved_analyses: list[SavedAnalysisModel] = []`.
+9. ✅ **Done (B1-5, `fda4e5c`)** Implement `ProjectModel.validate_references()` using Pydantic v2's `@model_validator(mode="after")` — runs after all field validators pass. Checks every edge's `parent`/`child` and every `SavedAnalysisModel`'s `frame_a`/`frame_b` against the declared frame names. Raises `ValidationError` naming the bad reference.
+10. ✅ **Done (B1-5, `fda4e5c`)** Implement `project_model_to_frame_graph(project: ProjectModel) -> FrameGraph`. Private `_model_to_htm()` dispatches on `model.kind` to call the appropriate `HTM.from_*()` constructor; `_model_to_tol6()` reconstructs `ToleranceSpec6`.
+11. ✅ **Done (B1-5, `fda4e5c`)** Implement `frame_graph_to_project_model(frame_graph, sim_settings, saved_analyses=None) -> ProjectModel`. Private `_htm_to_model()` reads `htm.input_representation` and dispatches on `kind`; falls back to `HTMInputMatrix` if `input_representation is None`. Private `_tol6_to_model()` converts `ToleranceSpec6`. **`TrialData` is NOT persisted** — only project topology is saved; run outputs are ephemeral.
+12. ✅ **Done (B1-5, `fda4e5c`)** `tests/test_schema.py`: 24 tests across 4 classes:
+    - `TestToleranceSpecModel` (4 tests): valid construction, negative bound raises, zero bound valid, invalid distribution raises
+    - `TestProjectModelValidation` (6 tests): valid project, `schema_version` defaults to 1, dangling edge parent/child raises, dangling saved-analysis frame_a/frame_b raises
+    - `TestHTMInputModelRoundTrip` (7 tests): all 4 `kind` variants, screw null/non-null `point_on_axis`, `None` input_representation fallback to matrix
+    - `TestConversionFunctions` (7 tests): frame/edge names round-trip, HTM matrix close, tolerance all-fields, no `validate_dag()` required, saved analyses, frame metadata
 
 **Interfaces:**
 
@@ -889,7 +913,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.12 `io/serializer.py`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session)*
+*(Last revised: 2026-06-25 — Claude, B1-5 implementation, commit `fda4e5c`, 16 tests in `tests/test_serializer.py`. **Critical:** `io/` package name collides with Python's frozen stdlib `io` module — see implementation notes below.)*
 
 **Responsibility:** JSON save/load for `io.schema` models, surfacing clear, actionable validation errors before the engine is ever invoked.
 
@@ -902,15 +926,21 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Granular Task List:**
 
-1. Implement `save_project(project: ProjectModel, path: str) -> None`: serialize via Pydantic's `.model_dump_json(indent=2)` (human-readable, diff-friendly indentation) and write to disk.
-2. Implement `load_project(path: str) -> ProjectModel`: read the file, parse via `ProjectModel.model_validate_json(...)`, then explicitly call `.validate_references()` (Section 6.11 Step 9) as a second validation pass.
-3. Wrap both raw `pydantic.ValidationError` and basic file errors (missing file, malformed JSON) in a single project-specific exception type (e.g., `ProjectLoadError`) with a clear, human-readable message — do not let a raw Pydantic stack trace be the only thing the user/GUI sees on a malformed file.
-4. Add a `schema_version` field to `ProjectModel` (Section 6.11) at this stage, even though there's only one version today — write `load_project` to check it and raise a specific, friendly error if a future version mismatch occurs, rather than letting an old/new file format silently fail with a confusing generic error. (Cheap insurance now; expensive to retrofit later once real project files exist.)
-5. Write `tests/test_serializer.py`:
-   - Round-trip: save then load a representative `ProjectModel`, confirm equivalence.
-   - Malformed JSON: confirm `load_project` raises `ProjectLoadError` with a clear message, not a raw `JSONDecodeError`.
-   - Dangling reference in the file: confirm `load_project` surfaces the same actionable message as the direct `validate_references()` test in Section 6.11.
-   - Missing file: confirm a clear `ProjectLoadError`, not an unhandled `FileNotFoundError`.
+1. ✅ **Done (B1-5, `fda4e5c`)** Implement `save_project(project: ProjectModel, path: str) -> None`: `project.model_dump_json(indent=2)` written to disk with UTF-8 encoding.
+2. ✅ **Done (B1-5, `fda4e5c`)** Implement `load_project(path: str) -> ProjectModel`. Sequential checks: (1) file open — wraps `FileNotFoundError` as `ProjectLoadError`; (2) `ProjectModel.model_validate_json(raw)` — wraps `pydantic.ValidationError` as `ProjectLoadError` (in Pydantic v2, `model_validate_json` wraps JSON decode errors as `ValidationError` internally, so no separate `json.JSONDecodeError` catch is needed); (3) `schema_version` check — `ProjectLoadError` if `!= EXPECTED_SCHEMA_VERSION`. The `validate_references()` model validator runs automatically during Step 2 (it is a `@model_validator(mode="after")`).
+3. ✅ **Done (B1-5, `fda4e5c`)** `ProjectLoadError(Exception)`: all load failures wrapped with a human-readable message; original exception always attached as `__cause__` via `raise ... from exc`.
+4. ✅ **Done (B1-5, `fda4e5c`)** `schema_version = 1` in `ProjectModel`. `EXPECTED_SCHEMA_VERSION = 1` constant in `io/serializer.py`. Error message includes both found and expected version numbers.
+5. ✅ **Done (B1-5, `fda4e5c`)** `tests/test_serializer.py`: 16 tests across 2 classes:
+   - `TestSaveLoadProject` (8 tests): `model_dump()` equal after round-trip, frame names, edge connectivity, valid JSON output, indent formatting, saved analysis survives, HTM matrix close to 1e-12, tolerance all-fields
+   - `TestLoadProjectErrorHandling` (8 tests): file not found raises `ProjectLoadError`, `__cause__` is `FileNotFoundError`, malformed JSON raises, empty file raises, schema_version mismatch raises, mismatch message contains version numbers, dangling edge reference raises, missing required field raises
+
+**Implementation notes — `io/` stdlib name collision (critical, non-obvious):**
+
+Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `FrozenImporter` in `sys.meta_path`, which sits ahead of `PathFinder`. This means `from io.schema import X` always resolves to the stdlib `io` module, which is not a package, raising `ModuleNotFoundError: 'io' is not a package`. Standard `sys.path` manipulation cannot override this — `FrozenImporter` is tried first regardless.
+
+**Fix: root-level `conftest.py`** (at repo root, alongside `io/`, `core/`, `tests/`) pre-loads local `io.schema` and `io.serializer` into `sys.modules` via `importlib.util.spec_from_file_location` before pytest begins test collection. Since Python's `_find_and_load()` checks `sys.modules` first, all subsequent `from io.schema import X` find the pre-loaded versions. `sys.modules['io']` (the stdlib) is NOT touched. Load order: `io.schema` first (it imports from `core.*` only), then `io.serializer` (its `from io.schema import ProjectModel` finds the already-registered `io.schema`).
+
+**Design note:** If `io/` is ever renamed (e.g., to `persistence/`), the root `conftest.py` can be removed entirely.
 
 **Interfaces:**
 
@@ -1071,7 +1101,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.20 `tests/`
 
-*(Last revised: 2026-06-24 — Claude, A6 implementation, commit `83b8ee3`. Global tolerance convention established: `DEFAULT_ATOL=1e-9` (exact composition checks), `SMALL_ANGLE_ATOL=1e-6` (checks where trig residuals at ~1 mrad apply). Three shared fixtures in `conftest.py`: `two_edge_chain`, `three_edge_chain`, `shared_frame_graph`. Integration tests cover: two-edge translation stack-up (exact), rotation→translation cross-coupling/lever-arm (hand-verified small-angle derivation), local-frame perturbation routing through nominal rotation. `test_shared_edge_sampling_consistency` written as required module-level function per Section 9 Item 3. `test_allocation_mc_validation_discrepancy` placeholder added to `test_allocation.py` per Section 9 Item 4 (`pytest.mark.skip` until B-2). README.md has CI entry point. 130 passed, 1 skipped.)*
+*(Last revised: 2026-06-25 — Claude, B1-2 through B1-5 implementations. All four B1 test files now implemented. **220 passed, 1 skipped.** Root `conftest.py` added (not to be confused with `tests/conftest.py`) to work around stdlib `io` name collision — see Section 6.12 implementation notes. Original A6 note: Global tolerance convention established: `DEFAULT_ATOL=1e-9` (exact composition checks), `SMALL_ANGLE_ATOL=1e-6` (checks where trig residuals at ~1 mrad apply). Three shared fixtures in `tests/conftest.py`: `two_edge_chain`, `three_edge_chain`, `shared_frame_graph`. Integration tests cover: two-edge translation stack-up (exact), rotation→translation cross-coupling/lever-arm (hand-verified small-angle derivation), local-frame perturbation routing through nominal rotation. `test_shared_edge_sampling_consistency` written as required module-level function per Section 9 Item 3. `test_allocation_mc_validation_discrepancy` placeholder added to `test_allocation.py` per Section 9 Item 4 (`pytest.mark.skip` until B-2). README.md has CI entry point.)*
 
 **Responsibility:** The full unit/integration test suite. Houses every hand-calculable validation case described per-module above, plus the dedicated cross-cutting regression tests called out in Section 9.
 
@@ -1083,15 +1113,25 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - `test_tolerance.py` — ✅ A2 (`3ac0eed`): 21 tests covering `ToleranceSpec6`, `apply_perturbation_batch`, `core/sampling.py`
 - `test_frame_graph.py` — ✅ A3 (`d81645c`): 24 tests covering `FrameGraph`, `adjoint()`, `compute_sensitivity()`
 - `test_monte_carlo_fk.py` — ✅ A4 (`744c562`): 18 tests covering `MonteCarloFKEngine`, `TrialData`, per-edge RNG
-- `test_stats.py` — ✅ A5 (`019eb34`): 26 tests covering Steps 1–7 of Section 6.8 (B1-3 Pareto tests to be added in Milestone B-1)
+- `test_stats.py` — ✅ A5 + B1-3 (`019eb34`, `fd8a08b`): 34 tests total — 26 covering Steps 1–7 (A5), 8 covering Steps 8–9 Pareto sensitivity (B1-3)
 - `test_integration.py` — ✅ A6 (`83b8ee3`): 15 end-to-end FK → stats tests; includes `test_shared_edge_sampling_consistency` (Section 9 Item 3 standalone named regression)
 - `test_allocation.py` — ✅ A6 placeholder (`83b8ee3`): `test_allocation_mc_validation_discrepancy` named and skipped per Section 9 Item 4 (to be implemented in B-2)
 
-**Pending (Milestone B-1):**
-- `test_bounding_shapes.py` (Section 6.9 — add when `postprocess/bounding_shapes.py` is implemented)
-- `test_reporting.py` (Section 6.10 — smoke tests only, add when `postprocess/reporting.py` is implemented)
-- `test_schema.py` (Section 6.11 — add when `io/schema.py` is implemented)
-- `test_serializer.py` (Section 6.12 — add when `io/serializer.py` is implemented)
+**✅ Implemented (Milestone B-1):**
+- `test_bounding_shapes.py` — ✅ B1-2 (`ef4c89c`): 25 tests, 6 classes — `TestFitBoundingBox`, `TestFitBoundingSphere`, `TestFitBoundingEllipsoid` (key: coverage=1.0 uniform-scale enclosure guarantee), `TestFitRotationCone`, `TestFitRotationBox`, `TestTypeHardening` (confirms `(N,4,4)` raises `ValueError`)
+- `test_reporting.py` — ✅ B1-4 (`e258538`): 17 smoke tests; `import matplotlib; matplotlib.use("Agg")` required as the **first import** (before any other matplotlib import) to prevent headless display errors in CI
+- `test_schema.py` — ✅ B1-5 (`fda4e5c`): 24 tests — `TestToleranceSpecModel`, `TestProjectModelValidation` (dangling-reference validator), `TestHTMInputModelRoundTrip` (all 4 kinds + fallback to matrix), `TestConversionFunctions` (full FrameGraph round-trip)
+- `test_serializer.py` — ✅ B1-5 (`fda4e5c`): 16 tests — save/load round-trip (8 checks), error handling (file not found, malformed JSON, empty file, schema_version mismatch, dangling reference, missing required field)
+
+**Note on `conftest.py`:** There are now **two** conftest files:
+- `tests/conftest.py` — test fixtures (`two_edge_chain`, `three_edge_chain`, `shared_frame_graph`), numerical tolerances
+- `conftest.py` (repo root) — **pytest session bootstrap** for the stdlib `io` name collision workaround (see Section 6.12 implementation notes); must remain at repo root
+
+**Pending (Milestone B-1, remaining):**
+- *(none — B1-2 through B1-5 tests all implemented)*
+
+**Pending (Milestone B-2):**
+- `test_allocation.py` — real implementation (currently a `pytest.mark.skip` placeholder)
 
 **Granular Task List (cross-cutting, beyond what's already specified per-module above):**
 1. ✅ **Done (A6, `83b8ee3`)** Set up `pytest` configuration with a shared `conftest.py` providing reusable fixtures: `two_edge_chain` (root→B→C, 5 mm + 10 mm translation nominals), `three_edge_chain` (Rz=π/4 + 50 mm + zero-tol), `shared_frame_graph` (shared-base multi-branch). No `pytest.ini` was needed — auto-discovery works from the project root. Module-level helpers `make_tol` / `make_zero_tol` / `make_htm` duplicated inline in `test_integration.py` rather than imported from conftest (conftest.py is not directly importable as a Python module in pytest's default discovery mode without additional path config).
@@ -1139,15 +1179,17 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Target: ~49–70 hours.**
 
-| # | Task | Module(s) | Est. Hours |
-|---|---|---|---|
-| B1-1 | ✅ Done (built in A3, commit `d81645c`) — `adjoint()`, `compute_sensitivity()`, and `path_edges_between()` implemented and cross-validated with finite-difference tests; formulas corrected (see changelog 2026-06-24) | `core/frame_graph.py` | 6–9 |
-| B1-2 | Bounding shape fitting: bounding box/ellipsoid/sphere (translation), bounding cone (rotation, locked as lead representation), rotation-vector type-hardening | `postprocess/bounding_shapes.py` | 8–12 |
-| B1-3 | Pareto sensitivity engine: `compute_tolerance_sensitivities()`, `ParetoSensitivityReport`, variance-contribution math (uniform/normal consistency) — new this revision, Mod 2 | `postprocess/stats.py` | 8–12 |
-| B1-4 | Plotting/reporting: histograms, 2D bounding-shape projections, Pareto sensitivity bar chart with embedded linear-approximation caveat | `postprocess/reporting.py` | 8–10 |
-| B1-5 | Pydantic schema + JSON save/load, validation-on-load with actionable errors | `io/schema.py`, `io/serializer.py` | 8–10 |
-| B1-6 | **Physical Validation Test Suite implementation (Section 9.1) — gating deliverable, not optional:** the Linear Stack-Up (RSS) Benchmark, the Sine-Bar Lever Arm Benchmark, and the Common-Ancestor Cancellation Benchmark, each as a dedicated, named regression test | `tests/` | 8–12 |
-| B1-7 | Example scripts demonstrating the new forward-analysis capabilities (sensitivity Pareto breakdown, component-selection and mitigation-verification use cases from Section 1.4) | `examples/` | 3–5 |
+| # | Status | Task | Module(s) | Est. Hours | Commit |
+|---|---|---|---|---|---|
+| B1-1 | ✅ Done | `adjoint()`, `compute_sensitivity()`, and `path_edges_between()` — built in A3, cross-validated with finite-difference tests; formulas corrected (see changelog 2026-06-24) | `core/frame_graph.py` | 6–9 | `d81645c` |
+| B1-2 | ✅ Done | Bounding shape fitting: box/ellipsoid/sphere (translation), cone (rotation, locked as lead), rotation-vector type-hardening; uniform-scale coverage=1.0 enclosure guarantee | `postprocess/bounding_shapes.py` | 8–12 | `ef4c89c` |
+| B1-3 | ✅ Done | Pareto sensitivity engine: `compute_tolerance_sensitivities()`, `ParetoSensitivityReport`, variance-contribution math (uniform/normal), `to_ascii_chart()` | `postprocess/stats.py` | 8–12 | `fd8a08b` |
+| B1-4 | ✅ Done | Plotting/reporting: 6 public functions; first-order caveat annotation locked/mandatory on Pareto chart; 4×3 GridSpec frame report | `postprocess/reporting.py` | 8–10 | `e258538` |
+| B1-5 | ✅ Done | Pydantic v2 schema + JSON save/load; `HTMInputModel` discriminated union; `ProjectModel` cross-ref validator; `ProjectLoadError`; `schema_version=1`; root `conftest.py` workaround for stdlib `io` name collision | `io/schema.py`, `io/serializer.py`, `conftest.py` | 8–10 | `fda4e5c` |
+| B1-6 | ✅ Done | **Physical Validation Test Suite (Section 9.1) — gating deliverable:** Linear Stack-Up (RSS) Benchmark, Sine-Bar Lever Arm Benchmark, Common-Ancestor Cancellation Benchmark, each as a dedicated named regression test | `tests/` | 8–12 | `aacd210` |
+| B1-7 | ✅ Done | Example scripts demonstrating new forward-analysis capabilities (sensitivity Pareto breakdown, component-selection and mitigation-verification use cases from Section 1.4) | `examples/` | 3–5 | `04b5b05` |
+
+**Milestone B-1 ✅ COMPLETE — all 7 tasks done. Suite: 223 passed, 1 skipped. B-2 is unblocked.**
 
 **Milestone B-1 exit criteria:** All three Section 9.1 physical validation benchmarks pass. The Pareto sensitivity breakdown produces correct, hand-verifiable rankings on a representative chain. Bounding shapes, plots, and project save/load all function end-to-end via script/CLI usage (still no GUI). **Milestone B-2 does not begin until this exit criteria is met.**
 
@@ -1286,4 +1328,10 @@ Because this tool produces engineering decisions about physical hardware toleran
 | 2026-06-24 | Claude (A5 implementation) | Implemented `postprocess/stats.py` (Steps 1–7 of Section 6.8). Key implementation decisions: (1) **Rotation-error extraction:** `scipy.spatial.transform.Rotation.from_matrix(R_error).as_rotvec()` chosen over skew-symmetric extraction — computes the exact matrix logarithm (Rodrigues), equivalent at small angles but more robust at moderately larger angles; documented in module docstring. `R_error[i] = R_nominal.T @ R_perturbed[i]` extracted via `np.einsum("ji,njk->nik", R_nominal, R_perturbed)`. Columns [3:6] of `pose_error_vector_batch` output are directly the `(N,3)` rotvecs that `postprocess/bounding_shapes.py`'s `fit_rotation_cone()`/`fit_rotation_box()` require — no intermediate conversion. (2) **Envelope dict structure:** `{dof_label: {"min": float, "max": float}}` for both `frame_envelope_box` and `point_pair_envelope_box` — consistent, easy for `sim/allocation.py`'s validation pass to extract per-DoF achieved bounds. (3) **Batched HTM inverse:** closed-form `_htm_inverse_batch()` helper using `R.transpose(0,2,1)` and `np.einsum("nij,nj->ni", R_inv, t)`, matching `HTM.inverse()` semantics without calling `np.linalg.inv`. (4) **Component validation:** `relative_pose_trials()` calls `frame_graph._assert_same_component(frame_a, frame_b)` which raises `DisjointFramesError` with the locked message text — no re-implementation of the validation logic. 26 tests written and passing in `tests/test_stats.py`, including the shared-ancestor cancellation integration test (Section 2.4 / 9.1.3 analog: relative leaf1↔leaf2 envelope is >10× tighter than absolute leaf1 envelope when a 10 mm shared-edge tolerance cancels from the relative measurement). **Steps 8–9 (Pareto sensitivity breakdown) are deferred to Milestone B-1 task B1-3.** Commit `019eb34`. |
 | 2026-06-24 | Claude (A6 implementation) | Created cross-cutting test infrastructure for the full suite. (1) **`tests/conftest.py`:** established the project-wide numerical tolerance convention — `DEFAULT_ATOL=1e-9` for near-exact floating-point composition checks and `SMALL_ANGLE_ATOL=1e-6` for checks expected to carry small-angle trig residual (e.g. `sin(δθ)` vs `δθ` at 1 mrad leaves ~1.7e-10 error, within `DEFAULT_ATOL` but documented explicitly). Three shared pytest fixtures: `two_edge_chain` (root→B→C, pure translation nominals), `three_edge_chain` (Rz=π/4 nominal on first edge + translation), `shared_frame_graph` (root→shared→leaf1, shared→leaf2). Module-level helpers (`make_tol`, `make_zero_tol`, `make_htm`) available for direct import. (2) **`tests/test_integration.py`:** 15 end-to-end tests across the A4+A5 pipeline: (a) *Two-edge translation stack-up* — single and stacked deltas, hand-verified to exact fixed-delta values using `_FixedToleranceSpec6`. (b) *Lever-arm coupling* — pivot edge with δrz=1 mrad, arm L=100 mm; hand-derived `dx_error = -δrz×L = -0.1 mm`, `rz_error = δrz = 1 mrad`; both confirmed against engine output at `SMALL_ANGLE_ATOL`. (c) *Local-frame perturbation routing* — local dx delta of 1 mm through a Rz(π/4) nominal splits into `0.001/√2` equally in world dx and dy, confirming right-multiply Section 2.2.2 convention is correctly expressed through the stats layer. (d) *TestFixtureSmoke* — confirms all three conftest fixtures are valid and runnable. (e) **`test_shared_edge_sampling_consistency`** — Section 9, Item 3 required standalone named module-level function (not inside a class), findable by `pytest -k`; demonstrates the shared-edge single-sample architectural property at 1000 trials. (3) **`tests/test_allocation.py`:** added `test_allocation_mc_validation_discrepancy` as Section 9, Item 4 required named placeholder (`pytest.mark.skip` until B-2). (4) **`README.md`:** added "Running Tests" section with CI one-liner and reference to Section 10 rule. 130 passed, 1 skipped. Commit `83b8ee3`. |
 | 2026-06-25 | Claude (A7 implementation, at Project Owner's request) | **Milestone A complete.** Implemented two standalone example scripts in `examples/`. (1) **`examples/single_chain_fk_example.py`** (commit `3d7936d`): 3-edge CNC spindle alignment chain (`world → spindle_housing → bearing_seat → tool_tip`) with mixed `uniform`/`normal` tolerances on 3 edges. Runs 50,000-trial MC, prints worst-case envelope box and 50/90/95/99th-percentile table for `tool_tip`. Demonstrates angular amplification: a 0.001 rad housing face-flatness error translates to ~0.15 mm tip displacement over the 150 mm tool overhang. Text-only output; no B-1 dependencies. (2) **`examples/multi_chain_shared_frame_example.py`** (commits `3d7936d` initial, `8232c12` extended at Project Owner's request): optical bench with two identical lens seats sharing a common upstream frame. Extended from the originally-planned single-scenario demonstration into a **four-scenario sweep**: *Scenario 0* — zero seat tolerances, proves bench errors cancel to floating-point zero (MC relative envelope max = 1.99e-13 mm, confirmed ≈ 0 ✓); *Scenario 1* — translational seat errors only, shows direct RSS contribution (~0.08 mm relative dx range), no lever-arm amplification; *Scenario 2* — rotational seat errors only, reveals lever-arm amplification: rz ±0.001 rad uniform seat error across 100 mm separation = 0.200 mm relative dy range, exactly matching the analytic prediction `L × 2 × rz_bound = 100 × 2 × 0.001`; *Scenario 3* — full tolerances, dy/dz dominated by rotational lever arm. Includes a summary comparison table and the `L × δθ` design rule of thumb: at 100 mm separation, a 0.001 rad seat rotation is equivalent to a 0.1 mm translational error. (3) Minor linter cleanup (shebang removal, commit `178fae0`). 130 tests passing, 1 skipped. **Milestone A is now fully complete.** |
+| 2026-06-25 | Claude (B1-2 implementation) | **Implemented `postprocess/bounding_shapes.py`** (commit `ef4c89c`). 5 public functions + 2 private helpers. **Key decisions:** (1) `fit_bounding_sphere`: uses centroid + max distance (conservative, always-correct bound — not the geometric minimum enclosing sphere, which would add implementation complexity for minimal benefit in an error-budgeting tool). (2) `fit_bounding_ellipsoid` with `coverage=1.0`: per-axis independent max projection does NOT guarantee enclosure when points have off-axis components (a point far along two PCA axes simultaneously can escape). Fix: **uniform-scale approach** — scale all PCA axes by the same factor `sqrt(max_Mahalanobis²)`, which guarantees enclosure by construction. This invariant is explicitly tested. For `coverage<1.0`: `chi2.ppf(coverage, df=3)` scaling. (3) `_check_rotvec_shape()` private helper raises `ValueError` with a clear message on `(N,4,4)` input, enforcing the `(N,3)` rotation-vector contract; `fit_rotation_cone` and `fit_rotation_box` both call it at entry. (4) `fit_rotation_cone`: `mean_axis` falls back to `[0,0,1]` when all rotvec magnitudes are zero, avoiding NaN. (5) `fit_rotation_box` delegates to `fit_bounding_box()` after the shape check — no separate implementation. 25 tests in `tests/test_bounding_shapes.py`, 6 test classes. |
+| 2026-06-25 | Claude (B1-3 implementation) | **Implemented Pareto sensitivity engine** (commit `fd8a08b`) — Steps 8–9 of `postprocess/stats.py`. **Key decisions:** (1) `trial_data` deliberately omitted from `compute_tolerance_sensitivities(frame_graph, frame_a, frame_b)` signature — tolerance specs (distribution, bound, sigma_level) live on `FrameGraph.edges[name].tolerance`, not on `TrialData`; `TrialData` is run outputs and has no role here. (2) Variance formula (locked): `uniform → b²/3`, `normal → (b/sigma_level)²`. Consistent with the RSS benchmark (Section 9.1.1). (3) Percentage contributions summed **unweighted across all 6 output DoF** — total output variance is the scalar sum of all 6 DoF variance contributions from all edges. (4) First-order-linear-approximation caveat required as **on-chart annotation** in `postprocess/reporting.py` — documented in function docstring and enforced as a hardcoded `ax.annotate()` in reporting.py (locked, cannot be suppressed). `ParetoSensitivityReport` dataclass: `ranked_contributions: list[tuple[str, str, float]]`, `total_variance: float`, `to_ascii_chart(top_n=10) -> str`. 8 new tests in `tests/test_stats.py`. |
+| 2026-06-25 | Claude (B1-4 implementation) | **Implemented `postprocess/reporting.py`** (commit `e258538`). 6 public functions + 3 private helpers (`_ensure_ax`, `_maybe_subsample` with `_SCATTER_MAX_POINTS = 2000`, `_bounding_shape_to_ellipse`). **Key decisions:** (1) First-order caveat annotation on the Pareto chart is **locked/mandatory** — hardcoded as `ax.annotate(...)` with `xycoords="axes fraction"` at `(0.01, 0.01)`. Cannot be suppressed without editing source. Justified by Section 1.4 sourcing-discussion use case (chart is shared standalone; caveat must travel with it). (2) `generate_frame_report` uses a 4×3 `GridSpec`: Row 0 = translation histograms, Row 1 = translation projections (xy/xz/yz), Row 2 = rotation histograms, Row 3 = rotation summary spanning all columns (`gs[3, :]`). (3) `plot_translation_projection` 2D ellipsoid: covariance-slice approach — extract the 2×2 submatrix of the 3D covariance for the requested plane, run `np.linalg.eigh`, render as `matplotlib.patches.Ellipse`. (4) All 6 public functions return `Axes` or `Figure`; callers own `.show()`/`.savefig()`. This module never calls either. 17 smoke tests in `tests/test_reporting.py`; `import matplotlib; matplotlib.use("Agg")` must be the first import. |
+| 2026-06-25 | Claude (B1-5 implementation) | **Implemented `io/schema.py` and `io/serializer.py`** (commit `fda4e5c`). **Key decisions:** (1) `HTMInputModel` discriminated union (4 variants: `xyz_euler`, `matrix`, `quaternion`, `screw`; `kind` field as Pydantic discriminator). HTMs without `input_representation` (e.g., composed transforms) fall back to `kind="matrix"`. (2) All numpy arrays stored as Python lists in JSON (`.tolist()`); reconstructed to numpy arrays on load. (3) `TrialData` NOT persisted — only project topology saved; run outputs are ephemeral by design. (4) `schema_version = 1` checked on load; mismatch raises `ProjectLoadError` with a friendly message including both found and expected versions. (5) `@model_validator(mode="after")` (Pydantic v2 idiom) used for cross-reference validation — runs after all field-level validators. (6) **Critical: `io/` stdlib name collision.** Python's frozen `io` module is resolved by `FrozenImporter` (sits ahead of `PathFinder` in `sys.meta_path`) — `from io.schema import X` always resolves to stdlib `io`, not our package; `sys.path` cannot override this. Fix: root-level `conftest.py` pre-loads `io.schema` and `io.serializer` into `sys.modules` via `importlib.util.spec_from_file_location` before pytest begins test collection; `sys.modules['io']` (stdlib) untouched. If `io/` is ever renamed, root `conftest.py` can be removed. 24 tests in `tests/test_schema.py`, 16 tests in `tests/test_serializer.py`. Suite: **220 passed, 1 skipped.** |
+| 2026-06-26 | Claude (B1-6 implementation) | **Implemented `tests/test_physical_validation.py`** (commit `aacd210`) — 3 module-level named regression tests constituting the Milestone B-1 gating deliverable (Section 9.1). (1) `test_rss_linear_stack_up`: 5-link normal-distribution translation chain, independent edges; validates output variance equals classical RSS sum within the statistically-derived 5-SE sampling bound `5 × σ² × √(2/N)`, not an arbitrary tolerance. (2) `test_sine_bar_lever_arm`: single rz-only pivot (1 mrad) + 100 mm arm; validates `var(dy) = L² × var(rz)` within 1% rtol — the lever-arm cross-coupling that motivates B-2's damping loop. (3) `test_common_ancestor_cancellation`: 1 m shared structural tolerance + 1 mm per-instrument tolerances; validates relative camera↔sample envelope stays < 3 mm (cancellation), while absolute camera envelope > 500 mm (shared error is genuinely large). Private helpers `_normal_tol`, `_uniform_tol`, `_zero_tol`, `_rz_only_tol` defined inline (not imported from conftest — conftest is not a regular importable module in pytest's default discovery mode). Suite: **223 passed, 1 skipped.** |
+| 2026-06-26 | Claude (B1-7 implementation) | **Implemented `examples/pareto_sensitivity_example.py`** (commit `04b5b05`) — standalone example script demonstrating all three Section 1.4 engineering-decision use cases using the B1 capabilities for the first time. Scenario: 4-edge serial inspection robot arm (`base → shoulder → elbow → wrist → probe_tip`, 500 mm reach). Section 1: baseline MC run (50,000 trials, seed=42) + envelope and percentile tables for `probe_tip`. Section 2: Sensitivity Pinpointing — `compute_tolerance_sensitivities(fg, "base", "probe_tip")` produces Pareto breakdown; `shoulder` edge (cheap universal joint, uniform ±3 mrad) dominates at ~32% per angular DoF via lever-arm amplification. Section 3: Component Selection — rebuild with `shoulder` upgraded to ±1 mrad, re-run MC, compare Pareto rankings; shows probe dx range reduces 56%, `elbow` identified as next bottleneck (8.4%). Section 4: Reporting — saves `probe_tip_frame_report.png`, `probe_tip_pareto_baseline.png`, and `probe_tip_pareto_upgraded.png` to `examples/output/` using `generate_frame_report` / `generate_sensitivity_report`. `matplotlib.use("Agg")` must be first matplotlib import (headless, no display). **Milestone B-1 fully complete. B-2 unblocked.** Suite: 223 passed, 1 skipped. |
 
