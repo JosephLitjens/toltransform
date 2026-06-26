@@ -61,8 +61,13 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
 - **Current milestone:** B-1.
-- **Last completed task:** B1-5 — `io/schema.py` + `io/serializer.py` (commit `fda4e5c`). Suite: **220 passed, 1 skipped**.
-- **Next task:** B1-6 — Section 9.1 physical validation benchmarks (gates B-2). Read Section 9.1 of the design spec before starting.
+- **Last completed task:** B1-6 — Physical Validation Test Suite (commit `aacd210`). Suite: **223 passed, 1 skipped**. **B-1 gating criteria met — B-2 is now unblocked.**
+- **Next task:** B1-7 — Example scripts demonstrating Pareto sensitivity, component selection, mitigation verification (Section 6.19 / 1.4).
+
+**✅ B1-6 complete (commit `aacd210`):** `tests/test_physical_validation.py` — 3 module-level named regression tests:
+- `test_rss_linear_stack_up`: 5-link normal-distribution translation chain; output variance matches classical RSS formula within quantified 5-SE sampling bound. 
+- `test_sine_bar_lever_arm`: 1-mrad pivot + 100mm arm; `var(dy) = L²×var(rz)` within 1% rtol — validates the lever-arm cross-coupling that motivates the B-2 damping loop.
+- `test_common_ancestor_cancellation`: 1m shared structural tolerance cancels completely from camera↔sample relative measurement; absolute frame confirms the shared error is non-trivially large.
 
 **✅ B1-5 complete (commit `fda4e5c`):** `io/schema.py` (7 Pydantic v2 models + discriminated HTMInputModel union + ProjectModel cross-ref validator + frame_graph_to_project_model/project_model_to_frame_graph), `io/serializer.py` (ProjectLoadError + save_project + load_project), root `conftest.py` (importlib workaround for stdlib 'io' frozen-module conflict). 40 new tests (test_schema.py + test_serializer.py).
 
@@ -85,9 +90,8 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 - Adjoint formula: `[[R, skew(t)@R],[0,R]]` — NOT `[[R,0],[skew(t)@R,R]]`
 - Sensitivity formula: `J_i = Ad_{T_{frame_a→exit_i}}` — NOT `Ad_{T_{exit→frame_b}}`
 
-**Key facts for the next session (B-1):**
-- `postprocess/stats.py` Steps 8–9 (Pareto sensitivity, `ParetoSensitivityReport`) are NOT yet implemented — deferred to B1-3.
-- `postprocess/reporting.py` exists as an empty stub — to be implemented in B1-4.
-- `postprocess/bounding_shapes.py` exists as an empty stub — to be implemented in B1-2.
-- `sim/allocation.py` does NOT exist yet — B-2 scope.
-- B1-1 (adjoint + sensitivity primitives in `core/frame_graph.py`) was completed early during A3. Do not re-implement.
+**Key facts for the next session (B1-7 / B-2 start):**
+- B1-7 (example scripts) is the only remaining B-1 task before the milestone is fully declared done.
+- B-2 is unblocked (all three Section 9.1 benchmarks pass).
+- `sim/allocation.py` does NOT exist yet — B-2 scope. Start only after B1-7 is done (or in parallel if agreed).
+- The design spec and docs/design_spec.md Section 7.2 still show B1-6 as "Pending" — update those after pushing commit `aacd210`.
