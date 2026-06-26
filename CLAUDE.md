@@ -92,8 +92,33 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 - Adjoint formula: `[[R, skew(t)@R],[0,R]]` — NOT `[[R,0],[skew(t)@R,R]]`
 - Sensitivity formula: `J_i = Ad_{T_{frame_a→exit_i}}` — NOT `Ad_{T_{exit→frame_b}}`
 
-**Key facts for the next session (B-2 start):**
-- B-2 is fully unblocked. All three Section 9.1 benchmarks pass; B1-7 is done.
-- `sim/allocation.py` does NOT exist yet — this is the primary B-2 deliverable.
-- Commits `aacd210` (B1-6), `0abc4b1` (CLAUDE.md post-B1-6), and `04b5b05` (B1-7) may still be unpushed — run `git log origin/main..HEAD` and push before starting B-2.
-- `docs/design_spec.md` Section 7.2 still shows B1-6 and B1-7 as "Pending" — update those and add changelog entries (Section 11) before or as part of the B-2 kickoff session.
+**Key facts for the B-2 session:**
+
+**Repository state (all pushed to origin/main as of 2026-06-26):**
+- `git log origin/main..HEAD` should show nothing — all B1 commits pushed (`eabd3f3` is HEAD).
+- Suite: **223 passed, 1 skipped** (the skipped test is `test_allocation_mc_validation_discrepancy` in `tests/test_allocation.py` — the placeholder that B2-3 will replace with real tests).
+
+**Files B-2 touches:**
+- `sim/allocation.py` — currently a **zero-byte empty file**. This is the primary B-2 deliverable.
+- `tests/test_allocation.py` — currently has 1 `pytest.mark.skip` placeholder. Replace with real tests in B2-3 (do not delete the file — add to it, then remove the placeholder once the real tests exist).
+
+**What already exists that B-2 depends on (all implemented and tested):**
+- `core/frame_graph.py`: `adjoint(T) -> np.ndarray (6,6)`, `compute_sensitivity(fg, frame_a, frame_b, edge_names) -> np.ndarray (6, 6*N)`, `path_edges_between(frame_a, frame_b) -> list[tuple[HTMEdge, bool]]` — B1-1 / commit `d81645c`. B2 calls these; does NOT re-implement them.
+- `sim/monte_carlo_fk.py`: `MonteCarloFKEngine.run(fg, n_trials, seed) -> TrialData` — A4 / commit `744c562`.
+- `postprocess/stats.py`: `point_pair_envelope_box(trial_data, frame_graph, frame_a, frame_b) -> dict` — A5 / commit `019eb34`. Used by `validate()` to compute achieved envelope.
+- `core/tolerance.py`: `ToleranceSpec`, `ToleranceSpec6` with `.locked` flag — A2 / commit `3ac0eed`. Locked edges excluded from free-variable set in allocation only.
+
+**One open design decision explicitly flagged in Section 6.7 Step 3:**
+When `EqualAllocation.solve()` has multiple active target DoF (e.g., target specifies both dx and rx bounds), the closed-form single scale factor `s` may satisfy one but not all. The spec flags this as: "take the most restrictive/binding DoF, or solve a small least-squares system — **decide and document explicitly once this task is reached**." This is the ONE thing the spec leaves for the B-2 session to decide. Flag the choice to the user before committing to it.
+
+**Locked constants (do not change without user discussion):**
+- `gamma = 0.9` per iteration (within the spec-locked `[0.7, 0.95]` range — pick 0.9 as the default)
+- `max_iter = 10`
+- `n_validate = 1000` (MC trials per validation pass — deliberately low for speed)
+- Non-convergence status message: **exactly** `"Allocation could not converge to target budget"`
+- `AllocationResult` must preserve **both** `baseline_linear_allocation` and `corrected_allocation` — never overwrite one with the other
+
+**B-2 task order (per Section 7.3):**
+1. B2-1: `AllocationObjective` interface + `EqualAllocation` + `AllocationEngine.solve()` — closed-form linear step only
+2. B2-2: `AllocationEngine.allocate()` + `AllocationResult` + `validate()` — damping loop and MC validation pass
+3. B2-3: Real tests in `tests/test_allocation.py` (7 required tests per Section 6.7 Step 7)
