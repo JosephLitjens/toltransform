@@ -1127,8 +1127,8 @@ Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `Froze
 - `tests/conftest.py` — test fixtures (`two_edge_chain`, `three_edge_chain`, `shared_frame_graph`), numerical tolerances
 - `conftest.py` (repo root) — **pytest session bootstrap** for the stdlib `io` name collision workaround (see Section 6.12 implementation notes); must remain at repo root
 
-**Pending (Milestone B-1, remaining):**
-- *(none — B1-2 through B1-5 tests all implemented)*
+**✅ Milestone B-1 complete — all tests implemented:**
+- `test_physical_validation.py` (B1-6, commit `aacd210`) — 3 named regression tests (RSS, lever-arm, cancellation)
 
 **Pending (Milestone B-2):**
 - `test_allocation.py` — real implementation (currently a `pytest.mark.skip` placeholder)
