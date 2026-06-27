@@ -1,5 +1,5 @@
 """
-tests/test_schema.py — Unit tests for io/schema.py.
+tests/test_schema.py — Unit tests for persistence/schema.py.
 
 Tests the Pydantic models (validation, reference checking) and the Python-object
 ↔ Pydantic-model conversion functions. No disk I/O — all round-trips happen in

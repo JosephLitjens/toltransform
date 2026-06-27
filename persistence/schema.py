@@ -1,9 +1,9 @@
 """
-io/schema.py — Pydantic models and Python-object ↔ model conversion functions.
+persistence/schema.py — Pydantic models and Python-object ↔ model conversion functions.
 
 Handles the data-model layer of project persistence: mapping between live Python
 objects (FrameGraph, HTM, ToleranceSpec6) and JSON-serializable Pydantic models.
-File I/O lives in io/serializer.py; this module has no disk operations.
+File I/O lives in persistence/serializer.py; this module has no disk operations.
 
 Public models:
     ToleranceSpecModel, ToleranceSpec6Model

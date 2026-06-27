@@ -1,5 +1,5 @@
 """
-tests/test_serializer.py — Tests for io/serializer.py.
+tests/test_serializer.py — Tests for persistence/serializer.py.
 
 Tests file I/O (save_project, load_project) and error handling (ProjectLoadError).
 All tests that write to disk use the pytest tmp_path fixture for automatic cleanup.
