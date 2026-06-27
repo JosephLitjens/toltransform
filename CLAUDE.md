@@ -60,9 +60,11 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** C (GUI) — C-1 ✅ COMPLETE, C-2 ✅ COMPLETE. Next: **C-3** (Run Panel).
-- **Last completed task:** C-2 — ToleranceEditorWidget (gui/tolerance_editor/). Suite: **262 passed, 0 skipped**.
-- **Next task:** C-3 — Run Panel (trigger simulation from GUI, show progress/results).
+- **Current milestone:** C (GUI) — C-1 ✅ COMPLETE, C-2 ✅ COMPLETE, C-3 ✅ COMPLETE. Next: **C-4** (Results Viewer).
+- **Last completed task:** C-3 — RunPanelWidget (gui/run_panel/). Suite: **273 passed, 0 skipped**.
+- **Next task:** C-4 — Results Viewer (envelope tables, histograms, bounding-shape projections, Pareto chart).
+
+**✅ C-3 complete:** `gui/run_panel/run_panel_widget.py` — `_RunWorker(QThread)` runs FK (`MonteCarloFKEngine.run`) or IK (`AllocationEngine.allocate`) on a background thread. `RunPanelWidget` has a mode selector (FK/IK), N-trials and seed spinboxes with Randomize button, and an IK-only target group (hidden in FK mode) with frame A/B combos and 6 target-bound spinboxes. `project_model_to_frame_graph()` called once on the main thread before starting the worker — the only place core objects are constructed (Section 5.3). mode/n_trials/seed written back to `project.sim_settings` on every change; IK target is ephemeral. 11 headless tests. Suite: **273 passed**.
 
 **✅ C-2 complete:** `gui/tolerance_editor/tolerance_editor_widget.py` — per-edge, per-DoF tolerance editing panel. `_DofRow` helper embeds 6 rows (dx→rz) directly in a QGridLayout, each with distribution combo, bound spin, σ-level spin (enabled only when normal), locked checkbox, and inline error label. `ToleranceEditorWidget` uses a QStackedWidget (placeholder vs. DoF panel), edge selector combo, and bulk-apply group. Write-on-change: validates via `ToleranceSpec` constructor, writes to `setattr(edge.tolerance, dof_name, ...)`, emits `project_changed`. `GraphEditorWidget` gained `edge_selected = Signal(str)` + `currentItemChanged` handler to auto-select edges in the tolerance panel. 13 new tests in `test_gui_tolerance_editor.py`. Suite: **262 passed**.
 

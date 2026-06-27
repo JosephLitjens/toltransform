@@ -7,7 +7,7 @@ and provides File > New / Open / Save / Save As actions via persistence/serializ
 Panels hosted here:
   - GraphEditorWidget (C-1) — left dock
   - ToleranceEditorWidget (C-2) — right dock
-  - Run Panel stub (C-3) — right dock
+  - RunPanelWidget (C-3) — right dock
   - Results Viewer stub (C-4) — right dock
   - Point-Pair Analysis stub (C-5) — right dock
 """
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.graph_editor.graph_editor_widget import GraphEditorWidget
+from gui.run_panel.run_panel_widget import RunPanelWidget
 from gui.tolerance_editor.tolerance_editor_widget import ToleranceEditorWidget
 from persistence.schema import ProjectModel, SimSettingsModel
 from persistence.serializer import ProjectLoadError, load_project, save_project
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
         self._project: ProjectModel = _empty_project()
         self._path: str | None = None
         self._dirty: bool = False
+        self._last_run_result: object = None
         self._setup_ui()
         self._update_title()
 
@@ -90,9 +92,18 @@ class MainWindow(QMainWindow):
         # Wire graph editor → tolerance editor: clicking an edge auto-selects it
         self._graph_editor.edge_selected.connect(self._tolerance_editor.set_selected_edge)
 
-        # Stubs for C-3 through C-5
+        # Run Panel (C-3)
+        self._run_panel = RunPanelWidget()
+        self._run_panel.project_changed.connect(self._on_project_changed)
+        self._run_panel.run_completed.connect(self._on_run_completed)
+        self._run_panel.run_failed.connect(self._on_run_failed)
+        run_dock = QDockWidget("Run Panel", self)
+        run_dock.setObjectName("RunPanelDock")
+        run_dock.setWidget(self._run_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, run_dock)
+
+        # Stubs for C-4 and C-5
         for title, note in [
-            ("Run Panel", "C-3 — not yet implemented"),
             ("Results Viewer", "C-4 — not yet implemented"),
             ("Point-Pair Analysis", "C-5 — not yet implemented"),
         ]:
@@ -106,6 +117,7 @@ class MainWindow(QMainWindow):
 
         self._graph_editor.set_project(self._project)
         self._tolerance_editor.set_project(self._project)
+        self._run_panel.set_project(self._project)
 
     # ── File actions ──────────────────────────────────────────────────────────
 
@@ -116,6 +128,7 @@ class MainWindow(QMainWindow):
         self._path = None
         self._graph_editor.set_project(self._project)
         self._tolerance_editor.set_project(self._project)
+        self._run_panel.set_project(self._project)
         self._set_dirty(False)
         self.statusBar().showMessage("New project created")
 
@@ -137,6 +150,7 @@ class MainWindow(QMainWindow):
         self._path = path
         self._graph_editor.set_project(self._project)
         self._tolerance_editor.set_project(self._project)
+        self._run_panel.set_project(self._project)
         self._set_dirty(False)
         self.statusBar().showMessage(f"Opened: {os.path.basename(path)}")
 
@@ -170,6 +184,13 @@ class MainWindow(QMainWindow):
         """Called when graph editor mutates the project (frames/edges added or removed)."""
         self._set_dirty(True)
         self._tolerance_editor.refresh_view()
+        self._run_panel.refresh_view()
+
+    def _on_run_completed(self, result: object) -> None:
+        self._last_run_result = result  # C-4 will read this
+
+    def _on_run_failed(self, error: str) -> None:
+        pass  # RunPanelWidget already shows the error in its own status label
 
     def _on_project_changed(self) -> None:
         self._set_dirty(True)
