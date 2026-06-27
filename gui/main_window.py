@@ -6,7 +6,7 @@ and provides File > New / Open / Save / Save As actions via persistence/serializ
 
 Panels hosted here:
   - GraphEditorWidget (C-1) — left dock
-  - Tolerance Editor stub (C-2) — right dock
+  - ToleranceEditorWidget (C-2) — right dock
   - Run Panel stub (C-3) — right dock
   - Results Viewer stub (C-4) — right dock
   - Point-Pair Analysis stub (C-5) — right dock
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.graph_editor.graph_editor_widget import GraphEditorWidget
+from gui.tolerance_editor.tolerance_editor_widget import ToleranceEditorWidget
 from persistence.schema import ProjectModel, SimSettingsModel
 from persistence.serializer import ProjectLoadError, load_project, save_project
 
@@ -72,19 +73,29 @@ class MainWindow(QMainWindow):
 
     def _setup_docks(self) -> None:
         self._graph_editor = GraphEditorWidget()
-        self._graph_editor.project_changed.connect(self._on_project_changed)
+        self._graph_editor.project_changed.connect(self._on_graph_editor_changed)
         graph_dock = QDockWidget("Graph Editor", self)
         graph_dock.setObjectName("GraphEditorDock")
         graph_dock.setWidget(self._graph_editor)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, graph_dock)
 
-        stub_names = [
-            ("Tolerance Editor", "C-2 — not yet implemented"),
+        # Tolerance Editor (C-2)
+        self._tolerance_editor = ToleranceEditorWidget()
+        self._tolerance_editor.project_changed.connect(self._on_project_changed)
+        tol_dock = QDockWidget("Tolerance Editor", self)
+        tol_dock.setObjectName("ToleranceEditorDock")
+        tol_dock.setWidget(self._tolerance_editor)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, tol_dock)
+
+        # Wire graph editor → tolerance editor: clicking an edge auto-selects it
+        self._graph_editor.edge_selected.connect(self._tolerance_editor.set_selected_edge)
+
+        # Stubs for C-3 through C-5
+        for title, note in [
             ("Run Panel", "C-3 — not yet implemented"),
             ("Results Viewer", "C-4 — not yet implemented"),
             ("Point-Pair Analysis", "C-5 — not yet implemented"),
-        ]
-        for title, note in stub_names:
+        ]:
             stub = QLabel(f"{title}\n({note})")
             stub.setAlignment(Qt.AlignmentFlag.AlignCenter)
             stub.setStyleSheet("color: gray; font-style: italic; padding: 20px;")
@@ -94,6 +105,7 @@ class MainWindow(QMainWindow):
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
         self._graph_editor.set_project(self._project)
+        self._tolerance_editor.set_project(self._project)
 
     # ── File actions ──────────────────────────────────────────────────────────
 
@@ -103,6 +115,7 @@ class MainWindow(QMainWindow):
         self._project = _empty_project()
         self._path = None
         self._graph_editor.set_project(self._project)
+        self._tolerance_editor.set_project(self._project)
         self._set_dirty(False)
         self.statusBar().showMessage("New project created")
 
@@ -123,6 +136,7 @@ class MainWindow(QMainWindow):
         self._project = project
         self._path = path
         self._graph_editor.set_project(self._project)
+        self._tolerance_editor.set_project(self._project)
         self._set_dirty(False)
         self.statusBar().showMessage(f"Opened: {os.path.basename(path)}")
 
@@ -151,6 +165,11 @@ class MainWindow(QMainWindow):
         self._save_project()
 
     # ── State management ──────────────────────────────────────────────────────
+
+    def _on_graph_editor_changed(self) -> None:
+        """Called when graph editor mutates the project (frames/edges added or removed)."""
+        self._set_dirty(True)
+        self._tolerance_editor.refresh_view()
 
     def _on_project_changed(self) -> None:
         self._set_dirty(True)

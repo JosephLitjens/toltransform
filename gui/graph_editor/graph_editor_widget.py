@@ -29,6 +29,7 @@ class GraphEditorWidget(QWidget):
     """Frame/Edge graph editor panel."""
 
     project_changed = Signal()
+    edge_selected = Signal(str)  # edge name; emitted when user clicks an edge in the tree
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -66,8 +67,14 @@ class GraphEditorWidget(QWidget):
         self._add_frame_btn.clicked.connect(self._on_add_frame)
         self._add_edge_btn.clicked.connect(self._on_add_edge)
         self._delete_btn.clicked.connect(self._on_delete_selected)
+        self._tree.currentItemChanged.connect(self._on_tree_selection_changed)
 
     # ── Actions ───────────────────────────────────────────────────────────────
+
+    def _on_tree_selection_changed(self, current, previous) -> None:
+        info = self._tree.selected_item_info()
+        if info is not None and info[1] == "edge":
+            self.edge_selected.emit(info[0])
 
     def _on_add_frame(self) -> None:
         if self._project is None:

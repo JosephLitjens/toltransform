@@ -60,9 +60,13 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** B-2 ✅ COMPLETE — all 3 tasks done. Next milestone: **C** (GUI).
-- **Last completed task:** B2-3 — Real tests in `tests/test_allocation.py` (commit `0c9bd9d`). Suite: **230 passed, 0 skipped**.
-- **Next task:** C-1 — Begin GUI milestone (Section 7.4, Milestone C).
+- **Current milestone:** C (GUI) — C-1 ✅ COMPLETE, C-2 ✅ COMPLETE. Next: **C-3** (Run Panel).
+- **Last completed task:** C-2 — ToleranceEditorWidget (gui/tolerance_editor/). Suite: **262 passed, 0 skipped**.
+- **Next task:** C-3 — Run Panel (trigger simulation from GUI, show progress/results).
+
+**✅ C-2 complete:** `gui/tolerance_editor/tolerance_editor_widget.py` — per-edge, per-DoF tolerance editing panel. `_DofRow` helper embeds 6 rows (dx→rz) directly in a QGridLayout, each with distribution combo, bound spin, σ-level spin (enabled only when normal), locked checkbox, and inline error label. `ToleranceEditorWidget` uses a QStackedWidget (placeholder vs. DoF panel), edge selector combo, and bulk-apply group. Write-on-change: validates via `ToleranceSpec` constructor, writes to `setattr(edge.tolerance, dof_name, ...)`, emits `project_changed`. `GraphEditorWidget` gained `edge_selected = Signal(str)` + `currentItemChanged` handler to auto-select edges in the tolerance panel. 13 new tests in `test_gui_tolerance_editor.py`. Suite: **262 passed**.
+
+**✅ C-1 complete (commit `e8d36b2`):** `gui/main_window.py` + `gui/graph_editor/` (5 files: `__init__.py`, `htm_entry_widget.py`, `frame_edge_tree.py`, `add_frame_dialog.py`, `add_edge_dialog.py`, `graph_editor_widget.py`). Multi-format HTM entry with live validation, frame/edge tree with root/junction labels, Add Frame/Edge dialogs, delete with referential guard. MainWindow hosts all panels as dock widgets with File > New/Open/Save/Save As menu. 19 tests in `test_gui_graph_editor.py`. Suite: **249 passed**.
 
 **✅ B2-3 complete (commit `0c9bd9d`):** `tests/test_allocation.py` — 7 real tests replacing the `@pytest.mark.skip` placeholder. Lever-arm geometry: `base→pivot` (identity nominal, rz free) → `pivot→arm` (Tx(1m) locked) → `arm→exit` (Ry(π/2) locked). The downstream Ry(π/2) node exposes the linear/MC discrepancy: linear Jacobian at exit_node=pivot (T=I) gives J[:,5]=[0,0,0,0,0,1] (zero dy coupling), but MC sees dy≈L·δrz (first-order, large). EqualAllocation option A locked 2026-06-26 (most restrictive s_k). Convergence at k=7 iterations (0.9^7·0.10=0.0478≤0.05); non-convergence demonstrated with B_dy=0.001 target. **Milestone B-2 fully complete.**
 
