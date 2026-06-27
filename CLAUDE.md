@@ -60,9 +60,15 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** B-1 ✅ COMPLETE — all 7 tasks done. Next milestone: **B-2** (inverse allocation).
-- **Last completed task:** B1-7 — Pareto sensitivity example script (commit `04b5b05`). Suite: **223 passed, 1 skipped**.
-- **Next task:** B2-1 — Start `sim/allocation.py` inverse allocator (Section 6.7).
+- **Current milestone:** B-2 ✅ COMPLETE — all 3 tasks done. Next milestone: **C** (GUI).
+- **Last completed task:** B2-3 — Real tests in `tests/test_allocation.py` (commit `0c9bd9d`). Suite: **230 passed, 0 skipped**.
+- **Next task:** C-1 — Begin GUI milestone (Section 7.4, Milestone C).
+
+**✅ B2-3 complete (commit `0c9bd9d`):** `tests/test_allocation.py` — 7 real tests replacing the `@pytest.mark.skip` placeholder. Lever-arm geometry: `base→pivot` (identity nominal, rz free) → `pivot→arm` (Tx(1m) locked) → `arm→exit` (Ry(π/2) locked). The downstream Ry(π/2) node exposes the linear/MC discrepancy: linear Jacobian at exit_node=pivot (T=I) gives J[:,5]=[0,0,0,0,0,1] (zero dy coupling), but MC sees dy≈L·δrz (first-order, large). EqualAllocation option A locked 2026-06-26 (most restrictive s_k). Convergence at k=7 iterations (0.9^7·0.10=0.0478≤0.05); non-convergence demonstrated with B_dy=0.001 target. **Milestone B-2 fully complete.**
+
+**✅ B2-2 complete (commit `b005eaf`):** `AllocationEngine.allocate()` + `AllocationResult` + `AllocationEngine.validate()` + `_copy_frame_graph_with_tolerances()` + `_damp_angular()`. Angular damping targets only indices (3,4,5); translation bounds unchanged. Locked constants: gamma=0.9, max_iter=10, n_validate=1000. Non-convergence message exactly: "Allocation could not converge to target budget".
+
+**✅ B2-1 complete (commit `22f7a86`):** `AllocationObjective` ABC + `EqualAllocation` + `AllocationEngine.solve()`. EqualAllocation option A (most restrictive): s=min_k(B_k/Σ|J[k,free]|). Design decision documented in Section 11 changelog.
 
 **✅ B1-7 complete (commit `04b5b05`):** `examples/pareto_sensitivity_example.py` — standalone example demonstrating all three Section 1.4 use cases: Sensitivity Pinpointing (Pareto breakdown via `compute_tolerance_sensitivities` + `to_ascii_chart()`), Component Selection (upgrade shoulder joint from ±3 mrad to ±1 mrad, compare Pareto rankings), Reporting (save frame report + 2 Pareto charts as PNG via `generate_frame_report` / `generate_sensitivity_report`). No new tests — example scripts only. **Milestone B-1 fully complete.**
 
