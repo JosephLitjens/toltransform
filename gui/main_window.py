@@ -1,0 +1,191 @@
+"""
+gui/main_window.py — Top-level QMainWindow for TolTransform (Section 6.13).
+
+Owns the in-memory ProjectModel, hosts all GUI panels as dock widgets,
+and provides File > New / Open / Save / Save As actions via persistence/serializer.py.
+
+Panels hosted here:
+  - GraphEditorWidget (C-1) — left dock
+  - Tolerance Editor stub (C-2) — right dock
+  - Run Panel stub (C-3) — right dock
+  - Results Viewer stub (C-4) — right dock
+  - Point-Pair Analysis stub (C-5) — right dock
+"""
+
+from __future__ import annotations
+
+import os
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QDockWidget,
+    QFileDialog,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QWidget,
+)
+
+from gui.graph_editor.graph_editor_widget import GraphEditorWidget
+from persistence.schema import ProjectModel, SimSettingsModel
+from persistence.serializer import ProjectLoadError, load_project, save_project
+
+
+def _empty_project() -> ProjectModel:
+    return ProjectModel(
+        sim_settings=SimSettingsModel(
+            mode="fk_verification",
+            n_trials=10000,
+            seed=42,
+        )
+    )
+
+
+class MainWindow(QMainWindow):
+    """Top-level application window."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project: ProjectModel = _empty_project()
+        self._path: str | None = None
+        self._dirty: bool = False
+        self._setup_ui()
+        self._update_title()
+
+    # ── UI construction ───────────────────────────────────────────────────────
+
+    def _setup_ui(self) -> None:
+        self.resize(1200, 800)
+        self._setup_menu_bar()
+        self.statusBar().showMessage("Ready")
+        self._setup_docks()
+
+    def _setup_menu_bar(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction("&New", self._new_project, "Ctrl+N")
+        file_menu.addAction("&Open...", self._open_project, "Ctrl+O")
+        file_menu.addSeparator()
+        file_menu.addAction("&Save", self._save_project, "Ctrl+S")
+        file_menu.addAction("Save &As...", self._save_project_as, "Ctrl+Shift+S")
+        file_menu.addSeparator()
+        file_menu.addAction("E&xit", self.close, "Ctrl+Q")
+
+    def _setup_docks(self) -> None:
+        self._graph_editor = GraphEditorWidget()
+        self._graph_editor.project_changed.connect(self._on_project_changed)
+        graph_dock = QDockWidget("Graph Editor", self)
+        graph_dock.setObjectName("GraphEditorDock")
+        graph_dock.setWidget(self._graph_editor)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, graph_dock)
+
+        stub_names = [
+            ("Tolerance Editor", "C-2 — not yet implemented"),
+            ("Run Panel", "C-3 — not yet implemented"),
+            ("Results Viewer", "C-4 — not yet implemented"),
+            ("Point-Pair Analysis", "C-5 — not yet implemented"),
+        ]
+        for title, note in stub_names:
+            stub = QLabel(f"{title}\n({note})")
+            stub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            stub.setStyleSheet("color: gray; font-style: italic; padding: 20px;")
+            dock = QDockWidget(title, self)
+            dock.setObjectName(f"{title.replace(' ', '')}Dock")
+            dock.setWidget(stub)
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
+        self._graph_editor.set_project(self._project)
+
+    # ── File actions ──────────────────────────────────────────────────────────
+
+    def _new_project(self) -> None:
+        if not self._confirm_discard_changes():
+            return
+        self._project = _empty_project()
+        self._path = None
+        self._graph_editor.set_project(self._project)
+        self._set_dirty(False)
+        self.statusBar().showMessage("New project created")
+
+    def _open_project(self) -> None:
+        if not self._confirm_discard_changes():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Project", "",
+            "TolTransform Project (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            project = load_project(path)
+        except ProjectLoadError as exc:
+            self._show_error("Cannot Open Project", str(exc))
+            return
+        self._project = project
+        self._path = path
+        self._graph_editor.set_project(self._project)
+        self._set_dirty(False)
+        self.statusBar().showMessage(f"Opened: {os.path.basename(path)}")
+
+    def _save_project(self) -> None:
+        if self._path is None:
+            self._save_project_as()
+            return
+        try:
+            save_project(self._project, self._path)
+        except Exception as exc:
+            self._show_error("Cannot Save Project", str(exc))
+            return
+        self._set_dirty(False)
+        self.statusBar().showMessage(f"Saved: {os.path.basename(self._path)}")
+
+    def _save_project_as(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Project As", "",
+            "TolTransform Project (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += ".json"
+        self._path = path
+        self._save_project()
+
+    # ── State management ──────────────────────────────────────────────────────
+
+    def _on_project_changed(self) -> None:
+        self._set_dirty(True)
+
+    def _set_dirty(self, dirty: bool = True) -> None:
+        self._dirty = dirty
+        self._update_title()
+
+    def _update_title(self) -> None:
+        base = "TolTransform"
+        if self._path:
+            base = f"TolTransform — {os.path.basename(self._path)}"
+        self.setWindowTitle(f"{base} *" if self._dirty else base)
+
+    def _confirm_discard_changes(self) -> bool:
+        if not self._dirty:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            "You have unsaved changes. Discard them and continue?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Save:
+            self._save_project()
+            return not self._dirty
+        return reply == QMessageBox.StandardButton.Discard
+
+    def _show_error(self, title: str, message: str) -> None:
+        QMessageBox.critical(self, title, message)
+
+    def closeEvent(self, event) -> None:
+        if self._confirm_discard_changes():
+            event.accept()
+        else:
+            event.ignore()

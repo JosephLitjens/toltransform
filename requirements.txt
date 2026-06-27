@@ -5,3 +5,5 @@ networkx
 pydantic
 matplotlib
 pytest
+PySide6
+pytest-qt
