@@ -15,14 +15,14 @@ import pytest
 from core.frame_graph import FrameGraph
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from core.transforms import HTM
-from io.schema import (
+from persistence.schema import (
     ProjectModel,
     SavedAnalysisModel,
     SimSettingsModel,
     frame_graph_to_project_model,
     project_model_to_frame_graph,
 )
-from io.serializer import ProjectLoadError, load_project, save_project
+from persistence.serializer import ProjectLoadError, load_project, save_project
 
 
 # ── shared helpers ────────────────────────────────────────────────────────────

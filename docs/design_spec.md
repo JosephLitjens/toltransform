@@ -233,10 +233,6 @@ After any Monte Carlo run (FK or the validation step of IK), the user may select
 
 ```
 toltransform/
-├── conftest.py             # Root pytest session setup: pre-loads io.schema + io.serializer into
-│                           #   sys.modules to work around the stdlib 'io' frozen-module name collision
-│                           #   (Python's FrozenImporter resolves 'io' before PathFinder reaches our io/
-│                           #   package — standard sys.path manipulation cannot override frozen modules)
 ├── core/
 │   ├── transforms.py       # HTM class; canonical 4x4 storage; conversions via pytransform3d
 │   ├── tolerance.py        # ToleranceSpec (per-DoF), sampling, perturbation composition
@@ -254,7 +250,7 @@ toltransform/
 │   ├── stats.py            # Per-Frame and per-point-pair envelope stats: box, percentiles, sigma
 │   ├── bounding_shapes.py  # Bounding box / ellipsoid / sphere (translation), bounding cone (rotation)
 │   └── reporting.py        # Plot generation (histograms, 2D projections of bounding shapes)
-├── io/
+├── persistence/
 │   ├── schema.py           # Pydantic models: Project, Frame, HTMEdge, ToleranceSpec, SimSettings,
 │   │                       #   SavedAnalysis
 │   └── serializer.py       # JSON save/load, validation-on-load
@@ -295,7 +291,7 @@ This is a conceptual sketch to align understanding; actual implementation will b
 
 ## 5.3 GUI-Engine Decoupling Principle (V1.0)
 
-The GUI **never touches `core`/`sim` objects directly during editing** — it reads and writes the `io.schema` Pydantic models exclusively, and only constructs `core`/`sim` objects at "Run" time from the validated schema. This keeps the engine fully scriptable/headless-usable independent of the GUI, and means a future CLI or batch-runner needs zero GUI code.
+The GUI **never touches `core`/`sim` objects directly during editing** — it reads and writes the `persistence.schema` Pydantic models exclusively, and only constructs `core`/`sim` objects at "Run" time from the validated schema. This keeps the engine fully scriptable/headless-usable independent of the GUI, and means a future CLI or batch-runner needs zero GUI code.
 
 ---
 
@@ -361,7 +357,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 **Interfaces:**
 
 - *Depends on:* `core/conversions.py` (all actual `pytransform3d` calls are routed through there — `transforms.py` itself never imports `pytransform3d` directly).
-- *Used by:* `core/tolerance.py` (perturbation composition), `core/frame_graph.py` (`HTMEdge.nominal`), `sim/monte_carlo_fk.py`, `sim/allocation.py`, `io/schema.py` (serialization round-trip), and eventually `gui/graph_editor/`.
+- *Used by:* `core/tolerance.py` (perturbation composition), `core/frame_graph.py` (`HTMEdge.nominal`), `sim/monte_carlo_fk.py`, `sim/allocation.py`, `persistence/schema.py` (serialization round-trip), and eventually `gui/graph_editor/`.
 - *Public API (conceptual):*
   ```
   HTM.from_xyz_euler(xyz, euler_angles, convention="intrinsic_zyx") -> HTM
@@ -411,7 +407,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 **Interfaces:**
 
 - *Depends on:* `core/transforms.py` (`HTM`), `core/sampling.py` (distribution sampling primitives — relocated here this revision; see note at top of Section 6).
-- *Used by:* `core/frame_graph.py` indirectly (an `HTMEdge` carries a `ToleranceSpec6`), `sim/monte_carlo_fk.py` (calls `.sample()` and `apply_perturbation_batch()` per edge), `sim/allocation.py` (constructs candidate `ToleranceSpec6` instances during allocation), `io/schema.py` (serializes/deserializes `ToleranceSpec`/`ToleranceSpec6`).
+- *Used by:* `core/frame_graph.py` indirectly (an `HTMEdge` carries a `ToleranceSpec6`), `sim/monte_carlo_fk.py` (calls `.sample()` and `apply_perturbation_batch()` per edge), `sim/allocation.py` (constructs candidate `ToleranceSpec6` instances during allocation), `persistence/schema.py` (serializes/deserializes `ToleranceSpec`/`ToleranceSpec6`).
 - *Public API (conceptual):*
   ```
   ToleranceSpec(distribution, bound, sigma_level=3.0, locked=False)
@@ -482,7 +478,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 **Interfaces:**
 
 - *Depends on:* `core/transforms.py` (`HTM`), `core/tolerance.py` (`ToleranceSpec6`), `networkx`.
-- *Used by:* `sim/monte_carlo_fk.py` (consumes `topological_edge_order()`, `all_edges()`, `root_frames()`), `sim/allocation.py` (consumes `path_edges_between()`, `adjoint()`, and `compute_sensitivity()` for its inverse solve, per the Mod 2 relocation), `postprocess/stats.py` (consumes `weakly_connected_components()` to validate point-pair queries, **and now also `path_edges_between()`/`compute_sensitivity()` for the Pareto sensitivity breakdown, per Mod 2**), `io/schema.py` (constructs a `FrameGraph` from a loaded `Project`), eventually `gui/graph_editor/`.
+- *Used by:* `sim/monte_carlo_fk.py` (consumes `topological_edge_order()`, `all_edges()`, `root_frames()`), `sim/allocation.py` (consumes `path_edges_between()`, `adjoint()`, and `compute_sensitivity()` for its inverse solve, per the Mod 2 relocation), `postprocess/stats.py` (consumes `weakly_connected_components()` to validate point-pair queries, **and now also `path_edges_between()`/`compute_sensitivity()` for the Pareto sensitivity breakdown, per Mod 2**), `persistence/schema.py` (constructs a `FrameGraph` from a loaded `Project`), eventually `gui/graph_editor/`.
 - *Public API (conceptual):*
   ```
   FrameGraph.add_frame(name, metadata=None)
@@ -859,7 +855,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ---
 
-## 6.11 `io/schema.py`
+## 6.11 `persistence/schema.py`
 
 *(Last revised: 2026-06-25 — Claude, B1-5 implementation, commit `fda4e5c`, 24 tests in `tests/test_schema.py`.)*
 
@@ -900,7 +896,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 **Interfaces:**
 
 - *Depends on:* `core/transforms.py`, `core/tolerance.py`, `core/frame_graph.py` (for the conversion functions in Steps 10–11), `pydantic`.
-- *Used by:* `io/serializer.py` (Section 6.12), eventually every GUI panel (Section 5.3 — the GUI reads/writes only these models).
+- *Used by:* `persistence/serializer.py` (Section 6.12), eventually every GUI panel (Section 5.3 — the GUI reads/writes only these models).
 - *Public API (conceptual):*
   ```
   ProjectModel, FrameModel, HTMEdgeModel, ToleranceSpec6Model, SimSettingsModel, SavedAnalysisModel
@@ -911,11 +907,11 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ---
 
-## 6.12 `io/serializer.py`
+## 6.12 `persistence/serializer.py`
 
-*(Last revised: 2026-06-25 — Claude, B1-5 implementation, commit `fda4e5c`, 16 tests in `tests/test_serializer.py`. **Critical:** `io/` package name collides with Python's frozen stdlib `io` module — see implementation notes below.)*
+*(Last revised: 2026-06-27 — renamed from `io/` to `persistence/` to eliminate stdlib name collision; root `conftest.py` deleted. Original B1-5 implementation commit `fda4e5c`.)*
 
-**Responsibility:** JSON save/load for `io.schema` models, surfacing clear, actionable validation errors before the engine is ever invoked.
+**Responsibility:** JSON save/load for `persistence.schema` models, surfacing clear, actionable validation errors before the engine is ever invoked.
 
 **Deliverables:**
 
@@ -929,22 +925,14 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 1. ✅ **Done (B1-5, `fda4e5c`)** Implement `save_project(project: ProjectModel, path: str) -> None`: `project.model_dump_json(indent=2)` written to disk with UTF-8 encoding.
 2. ✅ **Done (B1-5, `fda4e5c`)** Implement `load_project(path: str) -> ProjectModel`. Sequential checks: (1) file open — wraps `FileNotFoundError` as `ProjectLoadError`; (2) `ProjectModel.model_validate_json(raw)` — wraps `pydantic.ValidationError` as `ProjectLoadError` (in Pydantic v2, `model_validate_json` wraps JSON decode errors as `ValidationError` internally, so no separate `json.JSONDecodeError` catch is needed); (3) `schema_version` check — `ProjectLoadError` if `!= EXPECTED_SCHEMA_VERSION`. The `validate_references()` model validator runs automatically during Step 2 (it is a `@model_validator(mode="after")`).
 3. ✅ **Done (B1-5, `fda4e5c`)** `ProjectLoadError(Exception)`: all load failures wrapped with a human-readable message; original exception always attached as `__cause__` via `raise ... from exc`.
-4. ✅ **Done (B1-5, `fda4e5c`)** `schema_version = 1` in `ProjectModel`. `EXPECTED_SCHEMA_VERSION = 1` constant in `io/serializer.py`. Error message includes both found and expected version numbers.
+4. ✅ **Done (B1-5, `fda4e5c`)** `schema_version = 1` in `ProjectModel`. `EXPECTED_SCHEMA_VERSION = 1` constant in `persistence/serializer.py`. Error message includes both found and expected version numbers.
 5. ✅ **Done (B1-5, `fda4e5c`)** `tests/test_serializer.py`: 16 tests across 2 classes:
    - `TestSaveLoadProject` (8 tests): `model_dump()` equal after round-trip, frame names, edge connectivity, valid JSON output, indent formatting, saved analysis survives, HTM matrix close to 1e-12, tolerance all-fields
    - `TestLoadProjectErrorHandling` (8 tests): file not found raises `ProjectLoadError`, `__cause__` is `FileNotFoundError`, malformed JSON raises, empty file raises, schema_version mismatch raises, mismatch message contains version numbers, dangling edge reference raises, missing required field raises
 
-**Implementation notes — `io/` stdlib name collision (critical, non-obvious):**
-
-Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `FrozenImporter` in `sys.meta_path`, which sits ahead of `PathFinder`. This means `from io.schema import X` always resolves to the stdlib `io` module, which is not a package, raising `ModuleNotFoundError: 'io' is not a package`. Standard `sys.path` manipulation cannot override this — `FrozenImporter` is tried first regardless.
-
-**Fix: root-level `conftest.py`** (at repo root, alongside `io/`, `core/`, `tests/`) pre-loads local `io.schema` and `io.serializer` into `sys.modules` via `importlib.util.spec_from_file_location` before pytest begins test collection. Since Python's `_find_and_load()` checks `sys.modules` first, all subsequent `from io.schema import X` find the pre-loaded versions. `sys.modules['io']` (the stdlib) is NOT touched. Load order: `io.schema` first (it imports from `core.*` only), then `io.serializer` (its `from io.schema import ProjectModel` finds the already-registered `io.schema`).
-
-**Design note:** If `io/` is ever renamed (e.g., to `persistence/`), the root `conftest.py` can be removed entirely.
-
 **Interfaces:**
 
-- *Depends on:* `io/schema.py` (`ProjectModel`), `pydantic`, `json`/standard library file I/O.
+- *Depends on:* `persistence/schema.py` (`ProjectModel`), `pydantic`, `json`/standard library file I/O.
 - *Used by:* eventually `gui/main_window.py` (save/load/new-project actions), and any future CLI.
 - *Public API (conceptual):*
   ```
@@ -968,14 +956,14 @@ Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `Froze
 
 **Granular Task List (to be sharpened before Milestone C):**
 1. Implement the `QMainWindow` shell with a menu bar and status bar.
-2. Implement New/Open/Save/Save As actions, calling `io/serializer.py` directly (Section 5.3 — GUI talks to `io.schema` only).
+2. Implement New/Open/Save/Save As actions, calling `persistence/serializer.py` directly (Section 5.3 — GUI talks to `persistence.schema` only).
 3. Implement a simple in-memory "dirty" flag (unsaved changes indicator) tied to edits made in any child panel.
 4. Lay out the child panels (Sections 6.14–6.18) as dock widgets or tabs — decide layout once those panels' own specs are sharpened immediately before Milestone C.
-5. Wire a top-level error-display mechanism (e.g., a status bar message or modal dialog) for surfacing `ProjectLoadError` and validation errors from `io/serializer.py` / `io/schema.py` in a user-friendly way.
+5. Wire a top-level error-display mechanism (e.g., a status bar message or modal dialog) for surfacing `ProjectLoadError` and validation errors from `persistence/serializer.py` / `persistence/schema.py` in a user-friendly way.
 
 **Interfaces:**
 
-- *Depends on:* `io/schema.py`, `io/serializer.py`, all `gui/*` panel modules, `PySide6`.
+- *Depends on:* `persistence/schema.py`, `persistence/serializer.py`, all `gui/*` panel modules, `PySide6`.
 - *Used by:* the application entry point (`main.py`, not yet listed in Section 5.1 — add it as the top-level launch script when Milestone C begins).
 
 ---
@@ -994,7 +982,7 @@ Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `Froze
 
 **Interfaces:**
 
-- *Depends on:* `io/schema.py` (reads/writes `ProjectModel` directly), `core/transforms.py` (validation reuse), `PySide6`.
+- *Depends on:* `persistence/schema.py` (reads/writes `ProjectModel` directly), `core/transforms.py` (validation reuse), `PySide6`.
 - *Used by:* `gui/main_window.py`.
 
 ---
@@ -1012,7 +1000,7 @@ Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `Froze
 
 **Interfaces:**
 
-- *Depends on:* `io/schema.py`, `core/tolerance.py` (validation reuse), `PySide6`.
+- *Depends on:* `persistence/schema.py`, `core/tolerance.py` (validation reuse), `PySide6`.
 - *Used by:* `gui/main_window.py`.
 
 ---
@@ -1031,7 +1019,7 @@ Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `Froze
 
 **Interfaces:**
 
-- *Depends on:* `io/schema.py`, `core/frame_graph.py`, `sim/monte_carlo_fk.py`, `sim/allocation.py`, `PySide6`.
+- *Depends on:* `persistence/schema.py`, `core/frame_graph.py`, `sim/monte_carlo_fk.py`, `sim/allocation.py`, `PySide6`.
 - *Used by:* `gui/main_window.py`; produces the `TrialData`/`ValidationReport` that `gui/results_viewer/` consumes.
 
 ---
@@ -1069,7 +1057,7 @@ Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `Froze
 
 **Interfaces:**
 
-- *Depends on:* `io/schema.py`, `core/frame_graph.py`, `postprocess/stats.py`, `gui/results_viewer/` (shared display components), `PySide6`.
+- *Depends on:* `persistence/schema.py`, `core/frame_graph.py`, `postprocess/stats.py`, `gui/results_viewer/` (shared display components), `PySide6`.
 - *Used by:* `gui/main_window.py`.
 
 ---
@@ -1123,15 +1111,16 @@ Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `Froze
 - `test_schema.py` — ✅ B1-5 (`fda4e5c`): 24 tests — `TestToleranceSpecModel`, `TestProjectModelValidation` (dangling-reference validator), `TestHTMInputModelRoundTrip` (all 4 kinds + fallback to matrix), `TestConversionFunctions` (full FrameGraph round-trip)
 - `test_serializer.py` — ✅ B1-5 (`fda4e5c`): 16 tests — save/load round-trip (8 checks), error handling (file not found, malformed JSON, empty file, schema_version mismatch, dangling reference, missing required field)
 
-**Note on `conftest.py`:** There are now **two** conftest files:
+**Note on `conftest.py`:** There is one conftest file:
 - `tests/conftest.py` — test fixtures (`two_edge_chain`, `three_edge_chain`, `shared_frame_graph`), numerical tolerances
-- `conftest.py` (repo root) — **pytest session bootstrap** for the stdlib `io` name collision workaround (see Section 6.12 implementation notes); must remain at repo root
+
+The root-level `conftest.py` (stdlib `io` name-collision workaround) was deleted when `io/` was renamed to `persistence/` (2026-06-27).
 
 **✅ Milestone B-1 complete — all tests implemented:**
 - `test_physical_validation.py` (B1-6, commit `aacd210`) — 3 named regression tests (RSS, lever-arm, cancellation)
 
-**Pending (Milestone B-2):**
-- `test_allocation.py` — real implementation (currently a `pytest.mark.skip` placeholder)
+**✅ Milestone B-2 complete:**
+- `test_allocation.py` — ✅ B2-3 (`0c9bd9d`): 7 real tests (placeholder removed)
 
 **Granular Task List (cross-cutting, beyond what's already specified per-module above):**
 1. ✅ **Done (A6, `83b8ee3`)** Set up `pytest` configuration with a shared `conftest.py` providing reusable fixtures: `two_edge_chain` (root→B→C, 5 mm + 10 mm translation nominals), `three_edge_chain` (Rz=π/4 + 50 mm + zero-tol), `shared_frame_graph` (shared-base multi-branch). No `pytest.ini` was needed — auto-discovery works from the project root. Module-level helpers `make_tol` / `make_zero_tol` / `make_htm` duplicated inline in `test_integration.py` rather than imported from conftest (conftest.py is not directly importable as a Python module in pytest's default discovery mode without additional path config).
@@ -1185,7 +1174,7 @@ Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `Froze
 | B1-2 | ✅ Done | Bounding shape fitting: box/ellipsoid/sphere (translation), cone (rotation, locked as lead), rotation-vector type-hardening; uniform-scale coverage=1.0 enclosure guarantee | `postprocess/bounding_shapes.py` | 8–12 | `ef4c89c` |
 | B1-3 | ✅ Done | Pareto sensitivity engine: `compute_tolerance_sensitivities()`, `ParetoSensitivityReport`, variance-contribution math (uniform/normal), `to_ascii_chart()` | `postprocess/stats.py` | 8–12 | `fd8a08b` |
 | B1-4 | ✅ Done | Plotting/reporting: 6 public functions; first-order caveat annotation locked/mandatory on Pareto chart; 4×3 GridSpec frame report | `postprocess/reporting.py` | 8–10 | `e258538` |
-| B1-5 | ✅ Done | Pydantic v2 schema + JSON save/load; `HTMInputModel` discriminated union; `ProjectModel` cross-ref validator; `ProjectLoadError`; `schema_version=1`; root `conftest.py` workaround for stdlib `io` name collision | `io/schema.py`, `io/serializer.py`, `conftest.py` | 8–10 | `fda4e5c` |
+| B1-5 | ✅ Done | Pydantic v2 schema + JSON save/load; `HTMInputModel` discriminated union; `ProjectModel` cross-ref validator; `ProjectLoadError`; `schema_version=1`; originally named `io/` (renamed to `persistence/` 2026-06-27) | `persistence/schema.py`, `persistence/serializer.py` | 8–10 | `fda4e5c` |
 | B1-6 | ✅ Done | **Physical Validation Test Suite (Section 9.1) — gating deliverable:** Linear Stack-Up (RSS) Benchmark, Sine-Bar Lever Arm Benchmark, Common-Ancestor Cancellation Benchmark, each as a dedicated named regression test | `tests/` | 8–12 | `aacd210` |
 | B1-7 | ✅ Done | Example scripts demonstrating new forward-analysis capabilities (sensitivity Pareto breakdown, component-selection and mitigation-verification use cases from Section 1.4) | `examples/` | 3–5 | `04b5b05` |
 
@@ -1209,7 +1198,7 @@ Python's frozen `io` module (in `sys.stdlib_module_names`) is resolved by `Froze
 
 ## 7.4 Milestone C — GUI
 
-**Goal:** The full PySide6 desktop application on top of the proven engine (Milestones A, B-1, B-2). No engine logic is implemented here — this phase only builds the GUI layer described in Sections 6.13–6.18, talking exclusively to the `io.schema` data model (Section 5.3).
+**Goal:** The full PySide6 desktop application on top of the proven engine (Milestones A, B-1, B-2). No engine logic is implemented here — this phase only builds the GUI layer described in Sections 6.13–6.18, talking exclusively to the `persistence.schema` data model (Section 5.3).
 
 **Target: ~55–77 hours.**
 
@@ -1331,10 +1320,11 @@ Because this tool produces engineering decisions about physical hardware toleran
 | 2026-06-25 | Claude (B1-2 implementation) | **Implemented `postprocess/bounding_shapes.py`** (commit `ef4c89c`). 5 public functions + 2 private helpers. **Key decisions:** (1) `fit_bounding_sphere`: uses centroid + max distance (conservative, always-correct bound — not the geometric minimum enclosing sphere, which would add implementation complexity for minimal benefit in an error-budgeting tool). (2) `fit_bounding_ellipsoid` with `coverage=1.0`: per-axis independent max projection does NOT guarantee enclosure when points have off-axis components (a point far along two PCA axes simultaneously can escape). Fix: **uniform-scale approach** — scale all PCA axes by the same factor `sqrt(max_Mahalanobis²)`, which guarantees enclosure by construction. This invariant is explicitly tested. For `coverage<1.0`: `chi2.ppf(coverage, df=3)` scaling. (3) `_check_rotvec_shape()` private helper raises `ValueError` with a clear message on `(N,4,4)` input, enforcing the `(N,3)` rotation-vector contract; `fit_rotation_cone` and `fit_rotation_box` both call it at entry. (4) `fit_rotation_cone`: `mean_axis` falls back to `[0,0,1]` when all rotvec magnitudes are zero, avoiding NaN. (5) `fit_rotation_box` delegates to `fit_bounding_box()` after the shape check — no separate implementation. 25 tests in `tests/test_bounding_shapes.py`, 6 test classes. |
 | 2026-06-25 | Claude (B1-3 implementation) | **Implemented Pareto sensitivity engine** (commit `fd8a08b`) — Steps 8–9 of `postprocess/stats.py`. **Key decisions:** (1) `trial_data` deliberately omitted from `compute_tolerance_sensitivities(frame_graph, frame_a, frame_b)` signature — tolerance specs (distribution, bound, sigma_level) live on `FrameGraph.edges[name].tolerance`, not on `TrialData`; `TrialData` is run outputs and has no role here. (2) Variance formula (locked): `uniform → b²/3`, `normal → (b/sigma_level)²`. Consistent with the RSS benchmark (Section 9.1.1). (3) Percentage contributions summed **unweighted across all 6 output DoF** — total output variance is the scalar sum of all 6 DoF variance contributions from all edges. (4) First-order-linear-approximation caveat required as **on-chart annotation** in `postprocess/reporting.py` — documented in function docstring and enforced as a hardcoded `ax.annotate()` in reporting.py (locked, cannot be suppressed). `ParetoSensitivityReport` dataclass: `ranked_contributions: list[tuple[str, str, float]]`, `total_variance: float`, `to_ascii_chart(top_n=10) -> str`. 8 new tests in `tests/test_stats.py`. |
 | 2026-06-25 | Claude (B1-4 implementation) | **Implemented `postprocess/reporting.py`** (commit `e258538`). 6 public functions + 3 private helpers (`_ensure_ax`, `_maybe_subsample` with `_SCATTER_MAX_POINTS = 2000`, `_bounding_shape_to_ellipse`). **Key decisions:** (1) First-order caveat annotation on the Pareto chart is **locked/mandatory** — hardcoded as `ax.annotate(...)` with `xycoords="axes fraction"` at `(0.01, 0.01)`. Cannot be suppressed without editing source. Justified by Section 1.4 sourcing-discussion use case (chart is shared standalone; caveat must travel with it). (2) `generate_frame_report` uses a 4×3 `GridSpec`: Row 0 = translation histograms, Row 1 = translation projections (xy/xz/yz), Row 2 = rotation histograms, Row 3 = rotation summary spanning all columns (`gs[3, :]`). (3) `plot_translation_projection` 2D ellipsoid: covariance-slice approach — extract the 2×2 submatrix of the 3D covariance for the requested plane, run `np.linalg.eigh`, render as `matplotlib.patches.Ellipse`. (4) All 6 public functions return `Axes` or `Figure`; callers own `.show()`/`.savefig()`. This module never calls either. 17 smoke tests in `tests/test_reporting.py`; `import matplotlib; matplotlib.use("Agg")` must be the first import. |
-| 2026-06-25 | Claude (B1-5 implementation) | **Implemented `io/schema.py` and `io/serializer.py`** (commit `fda4e5c`). **Key decisions:** (1) `HTMInputModel` discriminated union (4 variants: `xyz_euler`, `matrix`, `quaternion`, `screw`; `kind` field as Pydantic discriminator). HTMs without `input_representation` (e.g., composed transforms) fall back to `kind="matrix"`. (2) All numpy arrays stored as Python lists in JSON (`.tolist()`); reconstructed to numpy arrays on load. (3) `TrialData` NOT persisted — only project topology saved; run outputs are ephemeral by design. (4) `schema_version = 1` checked on load; mismatch raises `ProjectLoadError` with a friendly message including both found and expected versions. (5) `@model_validator(mode="after")` (Pydantic v2 idiom) used for cross-reference validation — runs after all field-level validators. (6) **Critical: `io/` stdlib name collision.** Python's frozen `io` module is resolved by `FrozenImporter` (sits ahead of `PathFinder` in `sys.meta_path`) — `from io.schema import X` always resolves to stdlib `io`, not our package; `sys.path` cannot override this. Fix: root-level `conftest.py` pre-loads `io.schema` and `io.serializer` into `sys.modules` via `importlib.util.spec_from_file_location` before pytest begins test collection; `sys.modules['io']` (stdlib) untouched. If `io/` is ever renamed, root `conftest.py` can be removed. 24 tests in `tests/test_schema.py`, 16 tests in `tests/test_serializer.py`. Suite: **220 passed, 1 skipped.** |
+| 2026-06-25 | Claude (B1-5 implementation) | **Implemented `persistence/schema.py` and `persistence/serializer.py`** (commit `fda4e5c`). **Key decisions:** (1) `HTMInputModel` discriminated union (4 variants: `xyz_euler`, `matrix`, `quaternion`, `screw`; `kind` field as Pydantic discriminator). HTMs without `input_representation` (e.g., composed transforms) fall back to `kind="matrix"`. (2) All numpy arrays stored as Python lists in JSON (`.tolist()`); reconstructed to numpy arrays on load. (3) `TrialData` NOT persisted — only project topology saved; run outputs are ephemeral by design. (4) `schema_version = 1` checked on load; mismatch raises `ProjectLoadError` with a friendly message including both found and expected versions. (5) `@model_validator(mode="after")` (Pydantic v2 idiom) used for cross-reference validation — runs after all field-level validators. (6) **Stdlib name collision (now resolved):** package was originally named `io/`, which collided with Python's frozen stdlib `io` module; a root-level `conftest.py` importlib workaround was used. The package was renamed to `persistence/` on 2026-06-27 (see that changelog entry), eliminating the collision and the workaround. 24 tests in `tests/test_schema.py`, 16 tests in `tests/test_serializer.py`. Suite: **220 passed, 1 skipped.** |
 | 2026-06-26 | Claude (B1-6 implementation) | **Implemented `tests/test_physical_validation.py`** (commit `aacd210`) — 3 module-level named regression tests constituting the Milestone B-1 gating deliverable (Section 9.1). (1) `test_rss_linear_stack_up`: 5-link normal-distribution translation chain, independent edges; validates output variance equals classical RSS sum within the statistically-derived 5-SE sampling bound `5 × σ² × √(2/N)`, not an arbitrary tolerance. (2) `test_sine_bar_lever_arm`: single rz-only pivot (1 mrad) + 100 mm arm; validates `var(dy) = L² × var(rz)` within 1% rtol — the lever-arm cross-coupling that motivates B-2's damping loop. (3) `test_common_ancestor_cancellation`: 1 m shared structural tolerance + 1 mm per-instrument tolerances; validates relative camera↔sample envelope stays < 3 mm (cancellation), while absolute camera envelope > 500 mm (shared error is genuinely large). Private helpers `_normal_tol`, `_uniform_tol`, `_zero_tol`, `_rz_only_tol` defined inline (not imported from conftest — conftest is not a regular importable module in pytest's default discovery mode). Suite: **223 passed, 1 skipped.** |
 | 2026-06-26 | Claude (B1-7 implementation) | **Implemented `examples/pareto_sensitivity_example.py`** (commit `04b5b05`) — standalone example script demonstrating all three Section 1.4 engineering-decision use cases using the B1 capabilities for the first time. Scenario: 4-edge serial inspection robot arm (`base → shoulder → elbow → wrist → probe_tip`, 500 mm reach). Section 1: baseline MC run (50,000 trials, seed=42) + envelope and percentile tables for `probe_tip`. Section 2: Sensitivity Pinpointing — `compute_tolerance_sensitivities(fg, "base", "probe_tip")` produces Pareto breakdown; `shoulder` edge (cheap universal joint, uniform ±3 mrad) dominates at ~32% per angular DoF via lever-arm amplification. Section 3: Component Selection — rebuild with `shoulder` upgraded to ±1 mrad, re-run MC, compare Pareto rankings; shows probe dx range reduces 56%, `elbow` identified as next bottleneck (8.4%). Section 4: Reporting — saves `probe_tip_frame_report.png`, `probe_tip_pareto_baseline.png`, and `probe_tip_pareto_upgraded.png` to `examples/output/` using `generate_frame_report` / `generate_sensitivity_report`. `matplotlib.use("Agg")` must be first matplotlib import (headless, no display). **Milestone B-1 fully complete. B-2 unblocked.** Suite: 223 passed, 1 skipped. |
 | 2026-06-26 | Project Owner (decision), Claude (B2-1 implementation) | **Resolved EqualAllocation multi-DoF reconciliation (Section 6.7 Step 3):** when multiple active target DoF constraints are present, `EqualAllocation.solve()` uses the most-restrictive scale factor: `s = min_k(B_k / Σ_{free (i,j)} |J[k, 6*i+j]|)` — Option A. Rationale: guarantees all active constraints are satisfied simultaneously at the linear-approximation step, minimising the number of damping-loop iterations needed. Option B (least-squares across DoF) was rejected because it may violate individual constraints at the linear step, increasing reliance on the damping loop's fixed `max_iter=10` cap. **Implemented B2-1:** `AllocationObjective` (ABC), `EqualAllocation`, and `AllocationEngine.solve()` in `sim/allocation.py`. Free-edge definition: an edge where not all 6 DoF have `locked=True`. Within free edges, only non-locked DoF columns of the Jacobian contribute to the scale-factor computation; locked DoF on free edges keep their existing specs unchanged. Raises `ValueError("No free edges to allocate — all path edges are locked")` when the path has no free edges. Suite: 223 passed, 1 skipped. |
 | 2026-06-26 | Claude (B2-2 implementation) | **Implemented `AllocationEngine.allocate()`, `AllocationEngine.validate()`, `AllocationResult`, `ValidationReport`, `_copy_frame_graph_with_tolerances()`, and `_damp_angular()` in `sim/allocation.py`** (commit `b005eaf`). Key implementation details: (1) `_copy_frame_graph_with_tolerances(fg, new_tolerances)` builds a fresh `FrameGraph` with the same frames and edges but swaps in proposed tolerances for any edge whose name appears in `new_tolerances`; used by `validate()` so the original graph is never mutated. (2) `_damp_angular(allocation, gamma)` scales ONLY angular DoF (indices 3,4,5 = rx,ry,rz) by `gamma` per call — translation bounds (dx,dy,dz) are intentionally left unchanged because the failure mode being corrected is angular-to-positional lever-arm coupling, not translational error. Locked DoF are not damped. (3) `validate()` runs `MonteCarloFKEngine.run()` on a copied graph, then calls `point_pair_envelope_box()` for the relative pose between the two measurement frames; per-DoF pass/fail determined by `max(|achieved["min"]|, |achieved["max"]|) ≤ target_bound`. (4) `allocate()` runs `solve()` first, validates the baseline, and immediately returns with `iterations_used=0` if it passes. If it fails, a `deepcopy` of the baseline is damped iteratively up to `max_iter=10` times; the baseline dict is never modified so `AllocationResult.baseline_linear_allocation` always reflects the original linear solution. Non-convergence returns `converged=False` with status message exactly `"Allocation could not converge to target budget"`. Locked constants: `gamma=0.9`, `max_iter=10`, `n_validate=1000`, `seed=42`. Suite: 223 passed, 1 skipped (B2-3 placeholder still present). |
+| 2026-06-27 | Project Owner (request), Claude (implementation) | **Renamed `io/` package to `persistence/`** (commit TBD). Motivation: `io` is a Python frozen stdlib module; `FrozenImporter` in `sys.meta_path` sits ahead of `PathFinder`, so `from io.schema import X` always resolved to the stdlib, not our package. The previous fix was a root-level `conftest.py` (39 lines) using `importlib.util.spec_from_file_location` to pre-load our modules into `sys.modules` before pytest collection. The rename eliminates the collision entirely. Changes: (1) `io/` directory renamed to `persistence/`; (2) one intra-package import updated in `persistence/serializer.py` (`from io.schema` → `from persistence.schema`); (3) all `from io.schema`/`from io.serializer` imports updated in `tests/test_schema.py` and `tests/test_serializer.py`; (4) root `conftest.py` deleted; (5) `docs/design_spec.md` and `CLAUDE.md` updated throughout. Suite remains **230 passed, 0 skipped** — no test count change. |
 | 2026-06-26 | Claude (B2-3 implementation) | **Implemented 7 real tests in `tests/test_allocation.py`** (commit `0c9bd9d`), replacing the `@pytest.mark.skip` placeholder. **Test geometry for lever-arm tests (4, 5, 6, 7):** three-frame chain `base→pivot` (identity nominal, rz FREE, all other DoF locked with bound=0) → `pivot→arm` (Tx(1 m) locked, bound=0) → `arm→exit` (Ry(π/2) locked, bound=0). This geometry was chosen because: the linear Jacobian block for `pivot_edge` is `Ad_{T_{base→pivot,nom}} = Ad_I = I₆`, giving column 5 (rz input) as `[0,0,0,0,0,1]` — zero dy coupling at first order. The MC, however, composes the perturbed pivot rotation through the locked Tx(L) arm: `dy = L·sin(δrz) ≈ L·δrz` (first-order, missed entirely by the Jacobian). With L=1 m and target B_rz=0.10, EqualAllocation assigns rz-bound=0.10; MC produces dy_mc≈0.10 > B_dy=0.05. Damping converges after k=7 iterations (0.9⁷·0.10≈0.0478 ≤ 0.05). For the non-convergence test, B_dy=0.001 requires k≥44 iterations, far beyond max_iter=10. The downstream Ry(π/2) on `arm→exit` also swings the rz perturbation into an rx output error (confirmed: `rx ≈ δrz` via conjugation `Ry(-π/2)·Rz(δrz)·Ry(π/2) ≈ Rx(δrz)`), verifying correct behaviour with non-trivial downstream nominal rotations. **Tests:** (1) `test_equal_allocation_sanity` — 3-edge identity chain, all free, all edges get same bound per DoF. (2) `test_locked_edge_excluded` — locked middle edge absent from result dict. (3) `test_all_edges_locked_raises` — ValueError with "No free edges" message. (4) `test_allocation_mc_validation_discrepancy` — lever-arm chain, `solve()`→`validate()` returns `passed=False`, `per_dof_pass["dy"]=False`. (5) `test_damping_loop_convergence` — `allocate()` returns `converged=True`, `iterations_used≥1`, corrected angular bounds < baseline angular bounds. (6) `test_damping_loop_nonconvergence` — `converged=False`, `status_message=="Allocation could not converge to target budget"`, `iterations_used==10`. (7) `test_allocation_result_preserves_both_allocations` — baseline and corrected are distinct objects, baseline angular bounds > corrected. **Milestone B-2 fully complete.** Suite: **230 passed, 0 skipped.** |
 

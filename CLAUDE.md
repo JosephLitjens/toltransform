@@ -27,7 +27,7 @@ These are locked decisions from the design spec. If you think one of them is wro
 - **The cone is the lead representation for angular error**; the per-axis box is a secondary/expandable cross-check, not co-equal.
 - **`adjoint()` and `compute_sensitivity()` live in `core/frame_graph.py` — nowhere else.** Both `sim/allocation.py` and `postprocess/stats.py` consume this single shared implementation. Do not write a second copy.
 - **`locked` on a tolerance does not mean zero error.** A locked DoF is still sampled in FK mode — `locked` only excludes it from the free-variable set in inverse allocation (Section 6.2/6.7).
-- **GUI code talks only to `io.schema` models, never directly to `core`/`sim` objects** (Section 5.3). This rule applies starting Milestone C — not relevant yet in Milestones A/B-1/B-2.
+- **GUI code talks only to `persistence.schema` models, never directly to `core`/`sim` objects** (Section 5.3). This rule applies starting Milestone C — not relevant yet in Milestones A/B-1/B-2.
 
 ## Milestone discipline
 
@@ -77,7 +77,7 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 - `test_sine_bar_lever_arm`: 1-mrad pivot + 100mm arm; `var(dy) = L²×var(rz)` within 1% rtol — validates the lever-arm cross-coupling that motivates the B-2 damping loop.
 - `test_common_ancestor_cancellation`: 1m shared structural tolerance cancels completely from camera↔sample relative measurement; absolute frame confirms the shared error is non-trivially large.
 
-**✅ B1-5 complete (commit `fda4e5c`):** `io/schema.py` (7 Pydantic v2 models + discriminated HTMInputModel union + ProjectModel cross-ref validator + frame_graph_to_project_model/project_model_to_frame_graph), `io/serializer.py` (ProjectLoadError + save_project + load_project), root `conftest.py` (importlib workaround for stdlib 'io' frozen-module conflict). 40 new tests (test_schema.py + test_serializer.py).
+**✅ B1-5 complete (commit `fda4e5c`):** `persistence/schema.py` (7 Pydantic v2 models + discriminated HTMInputModel union + ProjectModel cross-ref validator + frame_graph_to_project_model/project_model_to_frame_graph), `persistence/serializer.py` (ProjectLoadError + save_project + load_project). 40 new tests (test_schema.py + test_serializer.py). *(Originally named `io/`; renamed to `persistence/` 2026-06-27 to eliminate stdlib name collision — root `conftest.py` workaround deleted at that time.)*
 
 **✅ B1-4 complete (commit `e258538`):** `postprocess/reporting.py` — 6 public functions (plot_histogram, plot_translation_projection, plot_rotation_summary, plot_pareto_sensitivity, generate_frame_report, generate_sensitivity_report). All return Axes/Figure; callers own show()/savefig(). 2D ellipsoid projection uses covariance-slice + eigh approach. First-order caveat annotation on Pareto chart is mandatory (locked). 17 new smoke tests.
 

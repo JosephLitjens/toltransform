@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from core.frame_graph import FrameGraph
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from core.transforms import HTM
-from io.schema import (
+from persistence.schema import (
     FrameModel,
     HTMEdgeModel,
     HTMInputMatrix,

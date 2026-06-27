@@ -1,5 +1,5 @@
 """
-io/serializer.py — File I/O for TolTransform project files.
+persistence/serializer.py — File I/O for TolTransform project files.
 
 Provides save_project() and load_project() for persisting and restoring
 ProjectModel instances as human-readable, diff-friendly JSON.
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pydantic
 
-from io.schema import ProjectModel
+from persistence.schema import ProjectModel
 
 EXPECTED_SCHEMA_VERSION = 1
 
