@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpacerItem,
     QStackedWidget,
@@ -163,7 +164,8 @@ class ToleranceEditorWidget(QWidget):
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
-        outer = QVBoxLayout(self)
+        container = QWidget()
+        outer = QVBoxLayout(container)
 
         # Edge selector row
         sel_row = QHBoxLayout()
@@ -190,6 +192,15 @@ class ToleranceEditorWidget(QWidget):
         # activated fires on every user pick, even when the index doesn't change
         self._edge_combo.activated.connect(self._on_edge_combo_changed)
         self._stack.setCurrentIndex(0)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(container)
+
+        main = QVBoxLayout(self)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.addWidget(scroll)
 
     def _build_dof_page(self) -> QWidget:
         page = QWidget()

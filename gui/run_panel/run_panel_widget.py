@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -118,7 +119,8 @@ class RunPanelWidget(QWidget):
     # ── UI construction ────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
-        outer = QVBoxLayout(self)
+        container = QWidget()
+        outer = QVBoxLayout(container)
 
         outer.addWidget(self._build_sim_settings_group())
         outer.addWidget(self._build_ik_group())
@@ -146,6 +148,15 @@ class RunPanelWidget(QWidget):
 
         # Initialise IK group visibility
         self._update_ik_group_visibility()
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(container)
+
+        main = QVBoxLayout(self)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.addWidget(scroll)
 
     def _build_sim_settings_group(self) -> QGroupBox:
         group = QGroupBox("Simulation Settings")

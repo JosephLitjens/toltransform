@@ -8,7 +8,7 @@ Panels hosted here:
   - GraphEditorWidget (C-1) — left dock
   - ToleranceEditorWidget (C-2) — right dock
   - RunPanelWidget (C-3) — right dock
-  - Results Viewer stub (C-4) — right dock
+  - ResultsViewerWidget (C-4) — right dock
   - Point-Pair Analysis stub (C-5) — right dock
 """
 
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.graph_editor.graph_editor_widget import GraphEditorWidget
+from gui.results_viewer.results_viewer_widget import ResultsViewerWidget
 from gui.run_panel.run_panel_widget import RunPanelWidget
 from gui.tolerance_editor.tolerance_editor_widget import ToleranceEditorWidget
 from persistence.schema import ProjectModel, SimSettingsModel
@@ -102,18 +103,21 @@ class MainWindow(QMainWindow):
         run_dock.setWidget(self._run_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, run_dock)
 
-        # Stubs for C-4 and C-5
-        for title, note in [
-            ("Results Viewer", "C-4 — not yet implemented"),
-            ("Point-Pair Analysis", "C-5 — not yet implemented"),
-        ]:
-            stub = QLabel(f"{title}\n({note})")
-            stub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            stub.setStyleSheet("color: gray; font-style: italic; padding: 20px;")
-            dock = QDockWidget(title, self)
-            dock.setObjectName(f"{title.replace(' ', '')}Dock")
-            dock.setWidget(stub)
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        # Results Viewer (C-4)
+        self._results_viewer = ResultsViewerWidget()
+        rv_dock = QDockWidget("Results Viewer", self)
+        rv_dock.setObjectName("ResultsViewerDock")
+        rv_dock.setWidget(self._results_viewer)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, rv_dock)
+
+        # Stub for C-5
+        stub = QLabel("Point-Pair Analysis\n(C-5 — not yet implemented)")
+        stub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        stub.setStyleSheet("color: gray; font-style: italic; padding: 20px;")
+        pp_dock = QDockWidget("Point-Pair Analysis", self)
+        pp_dock.setObjectName("PointPairAnalysisDock")
+        pp_dock.setWidget(stub)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, pp_dock)
 
         self._graph_editor.set_project(self._project)
         self._tolerance_editor.set_project(self._project)
@@ -129,6 +133,7 @@ class MainWindow(QMainWindow):
         self._graph_editor.set_project(self._project)
         self._tolerance_editor.set_project(self._project)
         self._run_panel.set_project(self._project)
+        self._results_viewer.clear()
         self._set_dirty(False)
         self.statusBar().showMessage("New project created")
 
@@ -151,6 +156,7 @@ class MainWindow(QMainWindow):
         self._graph_editor.set_project(self._project)
         self._tolerance_editor.set_project(self._project)
         self._run_panel.set_project(self._project)
+        self._results_viewer.clear()
         self._set_dirty(False)
         self.statusBar().showMessage(f"Opened: {os.path.basename(path)}")
 
@@ -187,7 +193,8 @@ class MainWindow(QMainWindow):
         self._run_panel.refresh_view()
 
     def _on_run_completed(self, result: object) -> None:
-        self._last_run_result = result  # C-4 will read this
+        self._last_run_result = result
+        self._results_viewer.set_result(result, self._project)
 
     def _on_run_failed(self, error: str) -> None:
         pass  # RunPanelWidget already shows the error in its own status label

@@ -60,9 +60,11 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** C (GUI) — C-1 ✅ COMPLETE, C-2 ✅ COMPLETE, C-3 ✅ COMPLETE. Next: **C-4** (Results Viewer).
-- **Last completed task:** C-3 — RunPanelWidget (gui/run_panel/). Suite: **273 passed, 0 skipped**.
-- **Next task:** C-4 — Results Viewer (envelope tables, histograms, bounding-shape projections, Pareto chart).
+- **Current milestone:** C (GUI) — C-1 ✅, C-2 ✅, C-3 ✅, C-4 ✅. Next: **C-5** (Point-Pair Analysis).
+- **Last completed task:** C-4 — ResultsViewerWidget + scroll-area fix for all panels. Suite: **284 passed, 0 skipped**.
+- **Next task:** C-5 — Point-Pair Analysis panel.
+
+**✅ C-4 complete:** `gui/results_viewer/results_viewer_widget.py` — QStackedWidget with placeholder / FK page / IK page. FK: frame selector combo, envelope table (6 rows, DoF|Min|Max from `frame_envelope_box`), `FigureCanvasQTAgg` embedding `generate_frame_report()` (recreated on frame switch, `plt.close` called on old), Pareto section with frame A/B combos + Compute button → `compute_tolerance_sensitivities` + `generate_sensitivity_report`. IK: convergence status label (✓ green / ✗ orange), corrected allocation table (edge × DoF, locked shown as "—" with tooltip for baseline diff), achieved envelope table (DoF|Min|Max|✓/✗). All three panels (tolerance editor, run panel, results viewer) now wrap content in `QScrollArea(widgetResizable=True)` so docks can be made arbitrarily small. 11 headless tests. Suite: **284 passed**.
 
 **✅ C-3 complete:** `gui/run_panel/run_panel_widget.py` — `_RunWorker(QThread)` runs FK (`MonteCarloFKEngine.run`) or IK (`AllocationEngine.allocate`) on a background thread. `RunPanelWidget` has a mode selector (FK/IK), N-trials and seed spinboxes with Randomize button, and an IK-only target group (hidden in FK mode) with frame A/B combos and 6 target-bound spinboxes. `project_model_to_frame_graph()` called once on the main thread before starting the worker — the only place core objects are constructed (Section 5.3). mode/n_trials/seed written back to `project.sim_settings` on every change; IK target is ephemeral. 11 headless tests. Suite: **273 passed**.
 
