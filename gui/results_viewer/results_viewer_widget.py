@@ -279,16 +279,21 @@ class ResultsViewerWidget(QWidget):
     # ── IK display ─────────────────────────────────────────────────────────────
 
     def _show_ik(self, result: AllocationResult) -> None:
+        method_label = {
+            "RSSAllocation": "Statistical (RSS)",
+            "EqualAllocation": "Worst-Case",
+        }.get(result.method, result.method)
+
         if result.converged:
             if result.iterations_used == 0:
-                status = "✓ Baseline linear allocation passed validation"
+                status = f"✓ Converged — no angular correction needed  [{method_label}]"
             else:
-                status = f"✓ Converged in {result.iterations_used} iteration(s)"
+                status = f"✓ Converged in {result.iterations_used} angular iteration(s)  [{method_label}]"
             self._ik_status_label.setStyleSheet(
                 "font-size: 13px; padding: 4px; color: green;"
             )
         else:
-            status = f"✗ {result.status_message}"
+            status = f"✗ {result.status_message}  [{method_label}]"
             self._ik_status_label.setStyleSheet(
                 "font-size: 13px; padding: 4px; color: orange;"
             )

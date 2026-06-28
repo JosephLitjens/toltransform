@@ -48,6 +48,7 @@ class AllocationResult:
     status_message: str
     final_validation_report: ValidationReport
     target_tolerance: ToleranceSpec6 | None = None
+    method: str = ""
 
 
 # ── Allocation objective interface ────────────────────────────────────────────
@@ -81,18 +82,40 @@ class AllocationObjective(ABC):
         """
 
 
+def _build_free_mask(free_edges: list, N: int) -> np.ndarray:
+    """Boolean mask (6*N,): True where edge DoF is not locked."""
+    mask = np.zeros(6 * N, dtype=bool)
+    for i, edge in enumerate(free_edges):
+        for j in range(6):
+            if not edge.tolerance[j].locked:
+                mask[6 * i + j] = True
+    return mask
+
+
+def _build_result(free_edges: list, s: float) -> dict[str, ToleranceSpec6]:
+    """Assign uniform bound=s to every free DoF; copy locked DoF unchanged."""
+    result: dict[str, ToleranceSpec6] = {}
+    for edge in free_edges:
+        specs = []
+        for j in range(6):
+            existing = edge.tolerance[j]
+            if existing.locked:
+                specs.append(copy.copy(existing))
+            else:
+                specs.append(ToleranceSpec(distribution="uniform", bound=s))
+        result[edge.name] = ToleranceSpec6(*specs)
+    return result
+
+
 class EqualAllocation(AllocationObjective):
-    """Uniform scale-factor allocation: every free edge gets the same bound.
+    """Worst-case (linear-sum) equal allocation.
 
-    For each active output DoF k, computes:
-        s_k = B_k / Σ_{free (i,j)} |J[k, 6*i+j]|
+    For each active output DoF k:
+        s_k = B_k / Σ_{free cols} |J[k, col]|
 
-    where the sum runs only over non-locked (edge, DoF) pairs. Uses the most
-    restrictive: s = min(s_k), ensuring every active constraint is satisfied
-    simultaneously at the linear-approximation level (Option A, locked 2026-06-26).
-
-    Non-locked DoF on free edges receive ToleranceSpec("uniform", bound=s).
-    Locked DoF on free edges are left unchanged.
+    s = min(s_k).  Assumes all sources contribute simultaneously in the same
+    direction — maximally conservative.  Appropriate when hard bounds must be
+    guaranteed regardless of error direction correlation.
     """
 
     def solve(
@@ -101,42 +124,50 @@ class EqualAllocation(AllocationObjective):
         target_tolerance: ToleranceSpec6,
         free_edges: list,
     ) -> dict[str, ToleranceSpec6]:
-        J = sensitivity_matrix  # (6, 6*N)
+        J = sensitivity_matrix
         N = len(free_edges)
+        free_mask = _build_free_mask(free_edges, N)
 
-        # Boolean mask over the 6*N columns: True = free (non-locked) DoF.
-        free_mask = np.zeros(6 * N, dtype=bool)
-        for i, edge in enumerate(free_edges):
-            for j in range(6):
-                if not edge.tolerance[j].locked:
-                    free_mask[6 * i + j] = True
-
-        # Per-output-DoF scale factors, restricted to free columns only.
         s_values: list[float] = []
         for k in range(6):
             row_sum = float(np.sum(np.abs(J[k, free_mask])))
             if row_sum > 0.0:
                 s_values.append(target_tolerance[k].bound / row_sum)
 
-        if not s_values:
-            # Degenerate: all free-column sensitivities are zero.
-            # Fall back to the smallest target bound as a safe conservative default.
-            s = float(min(target_tolerance[k].bound for k in range(6)))
-        else:
-            s = min(s_values)
+        s = min(s_values) if s_values else float(min(target_tolerance[k].bound for k in range(6)))
+        return _build_result(free_edges, s)
 
-        # Build the proposed ToleranceSpec6 for each free edge.
-        result: dict[str, ToleranceSpec6] = {}
-        for edge in free_edges:
-            specs = []
-            for j in range(6):
-                existing = edge.tolerance[j]
-                if existing.locked:
-                    specs.append(copy.copy(existing))
-                else:
-                    specs.append(ToleranceSpec(distribution="uniform", bound=s))
-            result[edge.name] = ToleranceSpec6(*specs)
-        return result
+
+class RSSAllocation(AllocationObjective):
+    """Statistical (RSS) equal allocation.
+
+    For each active output DoF k:
+        s_k = B_k / sqrt(Σ_{free cols} J[k, col]²)
+
+    s = min(s_k).  Assumes sources are statistically independent — correct for
+    manufacturing processes where errors are uncorrelated.  Gives bounds
+    sqrt(N_free) times less conservative than EqualAllocation when N free DoF
+    contribute equally, where N_free is the number of active free columns.
+    """
+
+    def solve(
+        self,
+        sensitivity_matrix: np.ndarray,
+        target_tolerance: ToleranceSpec6,
+        free_edges: list,
+    ) -> dict[str, ToleranceSpec6]:
+        J = sensitivity_matrix
+        N = len(free_edges)
+        free_mask = _build_free_mask(free_edges, N)
+
+        s_values: list[float] = []
+        for k in range(6):
+            rss = float(np.sqrt(np.sum(J[k, free_mask] ** 2)))
+            if rss > 0.0:
+                s_values.append(target_tolerance[k].bound / rss)
+
+        s = min(s_values) if s_values else float(min(target_tolerance[k].bound for k in range(6)))
+        return _build_result(free_edges, s)
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -297,6 +328,7 @@ class AllocationEngine:
         """
         if objective is None:
             objective = EqualAllocation()
+        method_name = type(objective).__name__
 
         baseline = AllocationEngine.solve(
             frame_graph, frame_a, frame_b, target_tolerance, objective
@@ -313,6 +345,7 @@ class AllocationEngine:
                 status_message="",
                 final_validation_report=report,
                 target_tolerance=target_tolerance,
+                method=method_name,
             )
 
         current = copy.deepcopy(baseline)
@@ -330,6 +363,7 @@ class AllocationEngine:
                     status_message="",
                     final_validation_report=report,
                     target_tolerance=target_tolerance,
+                    method=method_name,
                 )
 
         return AllocationResult(
@@ -340,4 +374,5 @@ class AllocationEngine:
             status_message="Allocation could not converge to target budget",
             final_validation_report=report,
             target_tolerance=target_tolerance,
+            method=method_name,
         )
