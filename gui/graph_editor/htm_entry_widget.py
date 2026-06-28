@@ -148,7 +148,10 @@ class HTMEntryWidget(QWidget):
         page = QWidget()
         form = QFormLayout(page)
         self._xyz_euler_xyz = [_spinbox() for _ in range(3)]
+        import math as _math
         self._xyz_euler_angles = [_spinbox(-9999.0, 9999.0) for _ in range(3)]
+        for sb in self._xyz_euler_angles:
+            sb.setSingleStep(_math.pi / 12)  # 15° in radians
         for label, sb in zip(["x", "y", "z"], self._xyz_euler_xyz):
             form.addRow(label, sb)
             sb.valueChanged.connect(self._validate)
