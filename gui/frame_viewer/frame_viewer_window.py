@@ -217,6 +217,11 @@ class FrameViewerWindow(QWidget):
         self._cloud_combo.currentTextChanged.connect(self._on_cloud_frame_changed)
         ctrl.addWidget(self._cloud_combo)
 
+        reset_btn = QPushButton("Reset View")
+        reset_btn.setFixedWidth(90)
+        reset_btn.clicked.connect(self._reset_camera)
+        ctrl.addWidget(reset_btn)
+
         ctrl.addStretch()
         self._status_label = QLabel("")
         self._status_label.setStyleSheet("color: gray; font-style: italic;")
@@ -364,3 +369,6 @@ class FrameViewerWindow(QWidget):
     def _on_cloud_frame_changed(self, frame: str) -> None:
         if self._mode == "cloud":
             self._draw_cloud()
+
+    def _reset_camera(self) -> None:
+        self._view.setCameraPosition(distance=1.5, elevation=30, azimuth=45)
