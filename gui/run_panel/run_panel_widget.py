@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from persistence.schema import ProjectModel, project_model_to_frame_graph
-from sim.allocation import AllocationEngine, AllocationResult, EqualAllocation, RSSAllocation
+from sim.allocation import AllocationEngine, AllocationResult, EqualAllocation, LoosestAllocation, RSSAllocation
 from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData
 
 _DOF_NAMES = ("dx", "dy", "dz", "rx", "ry", "rz")
@@ -216,6 +216,7 @@ class RunPanelWidget(QWidget):
         method_row = QHBoxLayout()
         method_row.addWidget(QLabel("Method:"))
         self._method_combo = QComboBox()
+        self._method_combo.addItem("Loosest (LP)", "lp")
         self._method_combo.addItem("Statistical (RSS)", "rss")
         self._method_combo.addItem("Worst-Case (Linear Sum)", "wc")
         method_row.addWidget(self._method_combo, stretch=1)
@@ -351,7 +352,12 @@ class RunPanelWidget(QWidget):
                 return
             target_tol = self._get_target_tol()
             max_iter = self._max_iter_spin.value()
-            objective = RSSAllocation() if self._method_combo.currentData() == "rss" else EqualAllocation()
+            _method = self._method_combo.currentData()
+            objective = (
+                LoosestAllocation() if _method == "lp"
+                else RSSAllocation() if _method == "rss"
+                else EqualAllocation()
+            )
         else:
             frame_a = frame_b = ""
             target_tol = None

@@ -3,7 +3,12 @@ Inverse tolerance allocation engine (Mode 2, Section 3.2).
 
 Builds on core/frame_graph.py's compute_sensitivity() — no Jacobian math
 is re-implemented here. The allocation objective is extensible via
-AllocationObjective; EqualAllocation is the only v1 implementation.
+AllocationObjective; three implementations are provided:
+
+  EqualAllocation   — worst-case linear sum, single uniform scale factor
+  RSSAllocation     — statistical RSS, single uniform scale factor
+  LoosestAllocation — log-sum NLP per-DoF maximization; each DoF gets the
+                      loosest bound its sensitivity allows, with no zeros
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.optimize import Bounds, LinearConstraint, minimize
 
 from core.frame_graph import FrameGraph, compute_sensitivity
 from core.tolerance import ToleranceSpec, ToleranceSpec6
@@ -92,17 +98,22 @@ def _build_free_mask(free_edges: list, N: int) -> np.ndarray:
     return mask
 
 
-def _build_result(free_edges: list, s: float) -> dict[str, ToleranceSpec6]:
-    """Assign uniform bound=s to every free DoF; copy locked DoF unchanged."""
+def _build_result(free_edges: list, bounds: np.ndarray) -> dict[str, ToleranceSpec6]:
+    """Build per-edge ToleranceSpec6 from a bounds vector of shape (6*N,).
+
+    Each entry bounds[6*i+j] is the proposed bound for edge i, DoF j.
+    Locked DoFs are copied unchanged from the edge's existing spec; their
+    corresponding entries in bounds are ignored.
+    """
     result: dict[str, ToleranceSpec6] = {}
-    for edge in free_edges:
+    for i, edge in enumerate(free_edges):
         specs = []
         for j in range(6):
             existing = edge.tolerance[j]
             if existing.locked:
                 specs.append(copy.copy(existing))
             else:
-                specs.append(ToleranceSpec(distribution="uniform", bound=s))
+                specs.append(ToleranceSpec(distribution="uniform", bound=float(bounds[6 * i + j])))
         result[edge.name] = ToleranceSpec6(*specs)
     return result
 
@@ -135,7 +146,8 @@ class EqualAllocation(AllocationObjective):
                 s_values.append(target_tolerance[k].bound / row_sum)
 
         s = min(s_values) if s_values else float(min(target_tolerance[k].bound for k in range(6)))
-        return _build_result(free_edges, s)
+        bounds = np.full(6 * N, s)
+        return _build_result(free_edges, bounds)
 
 
 class RSSAllocation(AllocationObjective):
@@ -167,8 +179,112 @@ class RSSAllocation(AllocationObjective):
                 s_values.append(target_tolerance[k].bound / rss)
 
         s = min(s_values) if s_values else float(min(target_tolerance[k].bound for k in range(6)))
-        return _build_result(free_edges, s)
+        bounds = np.full(6 * N, s)
+        return _build_result(free_edges, bounds)
 
+
+class LoosestAllocation(AllocationObjective):
+    """Log-sum (geometric-mean) loosest-possible worst-case allocation.
+
+    Solves the convex NLP:
+
+        maximize  Σ_{i,j} log(b_{ij})
+        subject to:
+            Σ_{i,j} |J[k, 6i+j]| * b_{ij}  ≤  B_k   for each active output DoF k
+            b_{ij} ≥ ε  (small positive floor)
+
+    The log-sum objective is the key difference from a plain linear-sum LP.
+    A linear-sum LP finds a vertex of the feasible polytope and will assign zero
+    to any DoF that competes in the same constraint row as a higher-sensitivity
+    DoF — producing exactly-zero bounds that are physically meaningless.  The
+    log-sum drives b_{ij} → 0 with an infinite penalty (log(0) = −∞), so every
+    free DoF always receives a positive, practically useful bound.
+
+    This is solved via SLSQP (scipy.optimize.minimize).  Warm-started from the
+    EqualAllocation solution, which is always feasible and close to the optimum
+    for symmetric chains.
+
+    DoFs with zero sensitivity to all output DoFs are unconstrained; their
+    bounds grow until they hit CAP (1e6), which is effectively infinite for
+    any realistic engineering tolerance.
+    """
+
+    CAP: float = 1e6   # upper bound for truly unconstrained (zero-sensitivity) DoFs
+    EPS: float = 1e-10  # lower bound floor — prevents log(0) and negative bounds
+
+    def solve(
+        self,
+        sensitivity_matrix: np.ndarray,
+        target_tolerance: ToleranceSpec6,
+        free_edges: list,
+    ) -> dict[str, ToleranceSpec6]:
+        J = sensitivity_matrix
+        N = len(free_edges)
+        n_vars = 6 * N
+        free_mask = _build_free_mask(free_edges, N)
+        free_idx = np.where(free_mask)[0]
+        n_free = len(free_idx)
+
+        # Build active output-DoF constraints using only free-variable columns
+        A_rows, b_vals = [], []
+        for k in range(6):
+            row_free = np.abs(J[k, free_idx])
+            if row_free.sum() > 0.0 and target_tolerance[k].bound > 0.0:
+                A_rows.append(row_free)
+                b_vals.append(target_tolerance[k].bound)
+
+        if not A_rows:
+            # No active constraints — return equal allocation as a safe default
+            s_vals = [target_tolerance[k].bound for k in range(6) if target_tolerance[k].bound > 0]
+            s = min(s_vals) if s_vals else 1.0
+            return _build_result(free_edges, np.full(n_vars, s))
+
+        A = np.array(A_rows)   # shape (n_constraints, n_free)
+        b = np.array(b_vals)
+
+        # Objective: minimize −Σ log(x)  (maximise geometric mean of all bounds)
+        def obj(x):
+            return -np.sum(np.log(np.maximum(x, self.EPS)))
+
+        def obj_jac(x):
+            return -1.0 / np.maximum(x, self.EPS)
+
+        # Per-DoF warm start: each variable gets 90% of its tightest individual budget.
+        # This avoids the SLSQP linesearch instability caused by a global equal-allocation
+        # warm start when targets differ by orders of magnitude (e.g., 0.001 rad vs 10 rad):
+        # some DoFs start thousands of times below their optimum and the large gradient
+        # mismatch breaks the linesearch.  Starting each DoF near its own optimum fixes this.
+        x0 = np.zeros(n_free)
+        for j in range(n_free):
+            col = A[:, j]
+            active = col > 0
+            if active.any():
+                # For each active constraint, estimate the fair share for this DoF:
+                # budget / (sensitivity × number of DoFs sharing this constraint)
+                n_sharing = np.maximum((A[active, :] > 0).sum(axis=1), 1)
+                x0[j] = float(np.min(b[active] / (col[active] * n_sharing))) * 0.9
+            else:
+                x0[j] = 1.0  # unconstrained DoF — arbitrary reasonable start
+
+        x0 = np.maximum(x0, self.EPS)
+
+        # trust-constr handles poorly-scaled problems much better than SLSQP
+        # (it uses a trust region rather than a linesearch, so large gradient
+        # differences between DoFs don't cause divergence).
+        lin_con = LinearConstraint(A, lb=-np.inf, ub=b)
+        bounds = Bounds(lb=self.EPS, ub=self.CAP)
+
+        res = minimize(
+            obj, x0, jac=obj_jac, method="trust-constr",
+            constraints=lin_con, bounds=bounds,
+            options={"maxiter": 3000, "gtol": 1e-10, "verbose": 0},
+        )
+        if not res.success:
+            raise ValueError(f"LoosestAllocation NLP failed: {res.message}")
+
+        full_bounds = np.zeros(n_vars)
+        full_bounds[free_idx] = res.x
+        return _build_result(free_edges, full_bounds)
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -237,6 +353,15 @@ def _scale_angular(
     return result
 
 
+def _first_free_angular_bound(allocation: dict[str, ToleranceSpec6]) -> float:
+    """Return the bound of the first free angular DoF found in the allocation."""
+    for tol6 in allocation.values():
+        for j in _ANGULAR_INDICES:
+            if not tol6[j].locked and tol6[j].bound > 0:
+                return tol6[j].bound
+    return 1.0  # fallback — no free angular DoFs found
+
+
 def _bisect_angular(
     frame_graph,
     lo: dict[str, ToleranceSpec6],   # passing allocation (tighter)
@@ -252,32 +377,22 @@ def _bisect_angular(
 
     Recovers the slack introduced by the fixed gamma step in the damping loop.
     Returns the loosest allocation that still passes MC validation.
+
+    The bisection tracks absolute angular-bound values (lo_scale, hi_scale), and
+    always computes the scale ratio relative to the *original* lo allocation
+    (base_scale), so that _scale_angular(lo, ratio) produces exactly mid_scale
+    regardless of how many iterations have elapsed.
     """
-    # Extract angular scale from any free angular DoF on any edge (all equal).
-    lo_scale = hi_scale = 1.0
-    for tol6 in lo.values():
-        for j in _ANGULAR_INDICES:
-            if not tol6[j].locked and tol6[j].bound > 0:
-                lo_scale = tol6[j].bound
-                break
-        else:
-            continue
-        break
-    for tol6 in hi.values():
-        for j in _ANGULAR_INDICES:
-            if not tol6[j].locked and tol6[j].bound > 0:
-                hi_scale = tol6[j].bound
-                break
-        else:
-            continue
-        break
+    base_scale = _first_free_angular_bound(lo)   # fixed reference — never updated
+    lo_scale = base_scale
+    hi_scale = _first_free_angular_bound(hi)
 
     best = lo
     best_report = None
 
     while (hi_scale - lo_scale) / max(hi_scale, 1e-12) > tol:
         mid_scale = (lo_scale + hi_scale) / 2.0
-        ratio = mid_scale / lo_scale
+        ratio = mid_scale / base_scale            # always relative to original lo
         mid = _scale_angular(lo, ratio)
         report = _mc_validate(
             frame_graph, mid, frame_a, frame_b, target_tolerance, n_validate, seed
@@ -412,7 +527,7 @@ class AllocationEngine:
             status_message == "Allocation could not converge to target budget".
         """
         if objective is None:
-            objective = EqualAllocation()
+            objective = LoosestAllocation()
         method_name = type(objective).__name__
 
         baseline = AllocationEngine.solve(

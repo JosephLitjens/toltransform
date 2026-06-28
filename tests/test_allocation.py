@@ -8,7 +8,7 @@ import pytest
 from core.frame_graph import FrameGraph
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from core.transforms import HTM
-from sim.allocation import AllocationEngine
+from sim.allocation import DOF_LABELS, AllocationEngine, EqualAllocation, LoosestAllocation
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -230,5 +230,145 @@ def test_allocation_result_preserves_both_allocations():
                     f"{edge_name} DoF {j}: baseline ({b_tol[j].bound:.6f}) "
                     f"must exceed corrected ({c_tol[j].bound:.6f})"
                 )
+
+
+# ── LoosestAllocation tests ───────────────────────────────────────────────────
+
+def test_loosest_allocation_beats_equal_on_mixed_target():
+    """LoosestAllocation allocates each DoF's budget independently; EqualAllocation wastes it.
+
+    2-edge identity chain: tight dx target (0.01), loose rz target (10.0).
+
+    With identity Jacobian, the dx constraint is:  b_dx0 + b_dx1 ≤ 0.01
+    EqualAllocation: s = min(B_dx/2, B_rz/2) = 0.01/2 = 0.005.
+        - Total dx budget used: 0.005+0.005 = 0.01  (full)
+        - Total rz budget used: 0.005+0.005 = 0.01  (wastes 9.99 of available 10.0!)
+
+    LoosestAllocation LP: treats each output DoF constraint independently.
+        - Total dx: still 0.01 (constraint is tight)
+        - Total rz: fills to 10.0 (LP uses the full rz budget)
+
+    Key assertion: sum(LP rz bounds) >> sum(Equal rz bounds).
+    """
+    fg = FrameGraph()
+    for name in ("f0", "f1", "f2"):
+        fg.add_frame(name)
+    free_tol = ToleranceSpec6(*[_spec(1.0) for _ in range(6)])
+    fg.add_edge("f0", "f1", HTM.from_xyz_euler([0, 0, 0], [0, 0, 0]), free_tol, name="e0")
+    fg.add_edge("f1", "f2", HTM.from_xyz_euler([0, 0, 0], [0, 0, 0]), free_tol, name="e1")
+
+    # Very tight dx, very loose rz — the binding constraint is dx for EqualAllocation
+    target = ToleranceSpec6(
+        _spec(0.01),   # dx tight
+        _spec(5.0),    # dy loose
+        _spec(5.0),    # dz loose
+        _spec(5.0),    # rx loose
+        _spec(5.0),    # ry loose
+        _spec(10.0),   # rz very loose
+    )
+
+    equal_result = AllocationEngine.solve(fg, "f0", "f2", target, objective=EqualAllocation())
+    lp_result = AllocationEngine.solve(fg, "f0", "f2", target, objective=LoosestAllocation())
+
+    # Compare total budget used per DoF (sum across edges) — not per-edge (LP may split unevenly)
+    def total_bound(result, dof_idx):
+        return sum(result[e][dof_idx].bound for e in ("e0", "e1"))
+
+    # Both methods must use the full dx budget (constraint is tight at the sum level)
+    assert total_bound(lp_result, 0) == pytest.approx(0.01, rel=0.01), (
+        f"LP total dx budget should equal target 0.01; got {total_bound(lp_result, 0):.6f}"
+    )
+    assert total_bound(equal_result, 0) == pytest.approx(0.01, rel=0.01), (
+        f"Equal total dx budget should equal target 0.01; got {total_bound(equal_result, 0):.6f}"
+    )
+
+    # LP must use the full rz budget (≈10.0); EqualAllocation wastes it (≈0.01)
+    lp_rz_total = total_bound(lp_result, 5)
+    equal_rz_total = total_bound(equal_result, 5)
+    assert lp_rz_total == pytest.approx(10.0, rel=0.01), (
+        f"LP total rz budget should fill target 10.0; got {lp_rz_total:.4f}"
+    )
+    assert lp_rz_total > equal_rz_total * 50, (
+        f"LP rz total ({lp_rz_total:.4f}) should far exceed equal rz total ({equal_rz_total:.4f})"
+    )
+
+
+def test_loosest_allocation_mc_validation_passes():
+    """LoosestAllocation's output must satisfy MC validation on a simple chain.
+
+    Uses the simple 3-edge identity chain with a 50% budget margin so that
+    MC sampling noise cannot borderline-fail the test: the NLP fills each DoF
+    budget to the constraint boundary (sum = B_k per output DoF), and with a
+    uniform distribution the MC worst-case sum equals exactly B_k — leaving no
+    room for sampling fluctuations.  Setting the MC check target to 1.5×B_k
+    gives a clear pass margin while still verifying the allocation is feasible.
+    """
+    fg, fa, fb = make_simple_chain(n_edges=3)
+    alloc_target = ToleranceSpec6(*[_spec(0.4) for _ in range(6)])
+    check_target  = ToleranceSpec6(*[_spec(0.6) for _ in range(6)])  # 50% margin
+
+    lp_alloc = AllocationEngine.solve(fg, fa, fb, alloc_target, objective=LoosestAllocation())
+    report = AllocationEngine.validate(fg, lp_alloc, fa, fb, check_target, n_trials=2000, seed=7)
+
+    assert report.passed, (
+        f"LoosestAllocation must satisfy MC validation (with 50% margin); failing DoFs: "
+        f"{[k for k, v in report.per_dof_pass.items() if not v]}"
+    )
+
+
+def test_loosest_allocation_no_zero_bounds_on_coupled_chain():
+    """LoosestAllocation must never return a zero (or near-zero) bound due to LP degeneracy.
+
+    A chain with a 90-degree nominal rotation creates cross-coupling in the Jacobian:
+    both ry and rz inputs contribute to the same output DoF rows.  A naive linear-sum
+    LP assigns all budget to one DoF and zeros the other (vertex degeneracy).
+    The log-sum objective must give positive bounds to BOTH ry and rz.
+
+    Regression test for the bug reported: "Ry and Rz show 0.0000000 in corrected allocation."
+    """
+    # 2-frame chain with Ry(π/2) nominal — couples ry and rz inputs in J rows
+    fg = FrameGraph()
+    fg.add_frame("a")
+    fg.add_frame("b")
+    ry90_nom = HTM.from_xyz_euler([0.0, 0.0, 0.0], [0.0, np.pi / 2.0, 0.0])
+    fg.add_edge("a", "b", ry90_nom, _free_tol6(0.01), name="e0")
+
+    target = ToleranceSpec6(*[_spec(0.001) for _ in range(6)])
+
+    result = AllocationEngine.solve(fg, "a", "b", target, objective=LoosestAllocation())
+
+    min_bound = 1e-6  # any finite, positive tolerance is acceptable
+    for j in range(6):
+        bound = result["e0"][j].bound
+        assert bound > min_bound, (
+            f"LoosestAllocation must not produce near-zero bounds (DoF {j}={DOF_LABELS[j]}: "
+            f"got {bound:.2e}, expected > {min_bound:.0e})"
+        )
+
+
+def test_loosest_allocation_lever_arm_converges():
+    """LoosestAllocation + damping loop must converge on the lever-arm chain.
+
+    LP allocation is still first-order linear and misses dy≈L·δrz coupling,
+    so the baseline will fail MC validation. The damping loop must correct it
+    within max_iter, same as with EqualAllocation.
+    """
+    fg, fa, fb = make_lever_arm_chain(L=1.0)
+    target = _lever_target(b_trans=0.05, b_rx=0.20, b_rz=0.10)
+
+    result = AllocationEngine.allocate(
+        fg, fa, fb, target,
+        objective=LoosestAllocation(),
+        n_validate=1000, gamma=0.9, max_iter=15, seed=42,
+    )
+
+    assert result.converged, f"LoosestAllocation must converge; got: {result.status_message}"
+    assert result.method == "LoosestAllocation"
+    # Corrected allocation must satisfy the target
+    report = result.final_validation_report
+    assert report.passed, (
+        f"Final validation must pass; failing DoFs: "
+        f"{[k for k, v in report.per_dof_pass.items() if not v]}"
+    )
 
 
