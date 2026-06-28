@@ -8,7 +8,7 @@ import pytest
 from core.frame_graph import FrameGraph
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from core.transforms import HTM
-from sim.allocation import DOF_LABELS, AllocationEngine, EqualAllocation, LoosestAllocation
+from sim.allocation import DOF_LABELS, AllocationEngine, EqualAllocation, LoosestAllocation, _mc_validate_multi
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -371,4 +371,221 @@ def test_loosest_allocation_lever_arm_converges():
         f"{[k for k, v in report.per_dof_pass.items() if not v]}"
     )
 
+
+# ── Multi-pair allocation tests ───────────────────────────────────────────────
+
+def _make_branching_graph():
+    """Three-branch graph: root -> base -> {m1, m2}.
+
+    Edge e_rb  : root -> base  (free, all DoFs)
+    Edge e_bm1 : base -> m1   (free, all DoFs)
+    Edge e_bm2 : base -> m2   (free, all DoFs)
+
+    e_rb is SHARED between pair (root, m1) and pair (root, m2).
+    """
+    fg = FrameGraph()
+    for f in ("root", "base", "m1", "m2"):
+        fg.add_frame(f)
+    fg.add_edge("root", "base", _identity(), _free_tol6(1.0), "e_rb")
+    fg.add_edge("base", "m1",  _identity(), _free_tol6(1.0), "e_bm1")
+    fg.add_edge("base", "m2",  _identity(), _free_tol6(1.0), "e_bm2")
+    return fg
+
+
+def test_solve_multi_shared_edge_respects_tighter_constraint():
+    """solve_multi: shared edge bound must satisfy the TIGHTER of two pairs' constraints.
+
+    Graph: root -> base -> m1 (path for pair 1)
+           root -> base -> m2 (path for pair 2)
+    Shared edge: e_rb (root -> base)
+
+    Pair 1: tight dx = 0.01  (2-edge path: e_rb + e_bm1)
+    Pair 2: loose dx = 1.0   (2-edge path: e_rb + e_bm2)
+
+    With identity Jacobians, the stacked constraints are:
+      b_rb_dx + b_bm1_dx  <=  0.01   (pair 1, tight)
+      b_rb_dx + b_bm2_dx  <=  1.0    (pair 2, loose)
+
+    Log-sum NLP: fills pair 1's constraint to equality → b_rb_dx ≈ 0.005.
+    The shared edge e_rb.dx must therefore be <= 0.005, regardless of pair 2's loose budget.
+    """
+    fg = _make_branching_graph()
+
+    target1 = ToleranceSpec6(_spec(0.01), *[_spec(5.0)] * 5)
+    target2 = ToleranceSpec6(_spec(1.0),  *[_spec(5.0)] * 5)
+    targets = [("root", "m1", target1), ("root", "m2", target2)]
+
+    alloc = AllocationEngine.solve_multi(fg, targets, objective=LoosestAllocation())
+
+    # All three free edges must appear in the allocation
+    assert set(alloc.keys()) == {"e_rb", "e_bm1", "e_bm2"}
+
+    b_rb  = alloc["e_rb"].dx.bound
+    b_bm1 = alloc["e_bm1"].dx.bound
+    b_bm2 = alloc["e_bm2"].dx.bound
+
+    # Pair 1 constraint must be satisfied at the linear level
+    assert b_rb + b_bm1 <= 0.01 + 1e-6, (
+        f"Pair-1 dx constraint violated: e_rb={b_rb:.5f} + e_bm1={b_bm1:.5f} > 0.01"
+    )
+    # The shared edge must be tight (~0.005 each for a 2-edge identity chain)
+    assert b_rb < 0.006, (
+        f"Shared edge e_rb.dx={b_rb:.5f} should be ≈0.005 (constrained by tight pair 1)"
+    )
+    # Non-shared pair-2 edge can be loose (pair 2's budget is 1.0)
+    assert b_bm2 > 0.9, (
+        f"Non-shared edge e_bm2.dx={b_bm2:.5f} should be ≈0.995 (pair 2 budget is loose)"
+    )
+
+
+def test_solve_multi_independent_pairs_unaffected():
+    """solve_multi: pairs with disjoint paths are solved independently.
+
+    Graph: f0 -> f1 -> f2 -> f3 (serial chain, 3 edges)
+    Pair 1: f0 -> f1  (only e0)
+    Pair 2: f2 -> f3  (only e2)
+    e1 (f1->f2) lies on neither path and should not appear in the allocation.
+
+    The two pairs share no edges, so their constraints are completely decoupled.
+    Each pair's budget should fill its own target independently.
+    """
+    fg, _, _ = make_simple_chain(n_edges=3)
+
+    target1 = ToleranceSpec6(_spec(0.02), *[_spec(5.0)] * 5)  # tight dx for pair 1
+    target2 = ToleranceSpec6(_spec(0.5),  *[_spec(5.0)] * 5)  # looser dx for pair 2
+    targets = [("f0", "f1", target1), ("f2", "f3", target2)]
+
+    alloc = AllocationEngine.solve_multi(fg, targets, objective=LoosestAllocation())
+
+    # Only edges on the respective paths appear
+    assert set(alloc.keys()) == {"e0", "e2"}, f"Unexpected edges: {set(alloc.keys())}"
+
+    # e0 is constrained by target1 (dx=0.02, 1 edge → bound ≈ 0.02)
+    assert alloc["e0"].dx.bound == pytest.approx(0.02, rel=0.01)
+    # e2 is constrained by target2 (dx=0.5, 1 edge → bound ≈ 0.5)
+    assert alloc["e2"].dx.bound == pytest.approx(0.5, rel=0.01)
+
+
+def test_allocate_multi_result_structure():
+    """allocate_multi must return an AllocationResult with per_pair_validation populated.
+
+    Validates the shape and types of the result, not the numerical optimality.
+    """
+    fg = _make_branching_graph()
+    target1 = ToleranceSpec6(*[_spec(0.05)] * 6)
+    target2 = ToleranceSpec6(*[_spec(0.05)] * 6)
+    targets = [("root", "m1", target1), ("root", "m2", target2)]
+
+    result = AllocationEngine.allocate_multi(
+        fg, targets,
+        objective=LoosestAllocation(),
+        n_validate=200, max_iter=30, seed=42,
+    )
+
+    # Result structure
+    assert result.per_pair_validation is not None
+    assert len(result.per_pair_validation) == 2
+
+    fa0, fb0, vr0 = result.per_pair_validation[0]
+    fa1, fb1, vr1 = result.per_pair_validation[1]
+    assert fa0 == "root" and fb0 == "m1"
+    assert fa1 == "root" and fb1 == "m2"
+
+    # Allocations cover all three edges
+    assert set(result.corrected_allocation.keys()) == {"e_rb", "e_bm1", "e_bm2"}
+    assert result.method == "LoosestAllocation"
+
+
+def test_allocate_multi_mc_validation_check_target():
+    """allocate_multi linear allocation passes MC validation when checked at 1.5× target.
+
+    Uses a pair of independent pairs (disjoint paths) with angular DoFs locked so there
+    is no angular-to-translation coupling. The NLP fills each pair's budget to its target
+    exactly, so the MC max equals the target. Validating at 1.5× gives a clear pass margin.
+    """
+    # Two single-edge chains with angular locked: f0->f1 and f2->f3
+    fg = FrameGraph()
+    for f in ("f0", "f1", "f2", "f3"):
+        fg.add_frame(f)
+
+    # All angular DoFs locked at 0; only translation is free
+    def _trans_free(bound=1.0):
+        return ToleranceSpec6(
+            _spec(bound), _spec(bound), _spec(bound),   # dx, dy, dz free
+            _spec(0.0, locked=True),                    # rx locked
+            _spec(0.0, locked=True),                    # ry locked
+            _spec(0.0, locked=True),                    # rz locked
+        )
+
+    fg.add_edge("f0", "f1", _identity(), _trans_free(1.0), "e0")
+    fg.add_edge("f2", "f3", _identity(), _trans_free(1.0), "e2")
+
+    alloc_target = ToleranceSpec6(_spec(0.4), _spec(0.4), _spec(0.4), _spec(1.0), _spec(1.0), _spec(1.0))
+    check_target  = ToleranceSpec6(_spec(0.6), _spec(0.6), _spec(0.6), _spec(1.0), _spec(1.0), _spec(1.0))
+
+    targets_alloc  = [("f0", "f1", alloc_target), ("f2", "f3", alloc_target)]
+    targets_check  = [("f0", "f1", check_target),  ("f2", "f3", check_target)]
+
+    alloc = AllocationEngine.solve_multi(fg, targets_alloc, objective=LoosestAllocation())
+
+    # Each edge gets 0.4 budget (single edge per pair)
+    assert alloc["e0"].dx.bound == pytest.approx(0.4, rel=0.01)
+    assert alloc["e2"].dx.bound == pytest.approx(0.4, rel=0.01)
+
+    # MC validation at 1.5× budget must pass for both pairs
+    all_passed, per_pair = _mc_validate_multi(fg, alloc, targets_check, n_validate=2000, seed=7)
+    assert all_passed, (
+        f"Multi-pair MC validation must pass at 1.5× margin. Failing: "
+        + ", ".join(f"{fa}→{fb}: {[k for k, v in vr.per_dof_pass.items() if not v]}"
+                    for fa, fb, vr in per_pair if not vr.passed)
+    )
+
+
+def test_allocate_multi_lever_arm_two_pairs():
+    """allocate_multi with two lever-arm pairs: both must converge.
+
+    Uses the lever-arm fixture (only rz free, all other DoFs locked) for both pairs.
+    The two chains are disjoint so their allocations are independent, but both
+    must be corrected by the damping loop for angular-to-translation coupling.
+    """
+    fg = FrameGraph()
+    for f in ("base", "pivot", "arm", "exit",
+              "base2", "pivot2", "arm2", "exit2"):
+        fg.add_frame(f)
+
+    pivot_tol = ToleranceSpec6(
+        _spec(0.0, locked=True), _spec(0.0, locked=True), _spec(0.0, locked=True),
+        _spec(0.0, locked=True), _spec(0.0, locked=True), _spec(0.01),
+    )
+    arm_nom = HTM.from_xyz_euler([1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    ry_nom  = HTM.from_xyz_euler([0.0, 0.0, 0.0], [0.0, np.pi / 2.0, 0.0])
+
+    fg.add_edge("base",  "pivot",  _identity(), pivot_tol,    "pivot_edge")
+    fg.add_edge("pivot", "arm",    arm_nom,     _locked_tol6(), "arm_edge")
+    fg.add_edge("arm",   "exit",   ry_nom,      _locked_tol6(), "ry_edge")
+
+    fg.add_edge("base2", "pivot2", _identity(), pivot_tol,    "pivot_edge2")
+    fg.add_edge("pivot2", "arm2",  arm_nom,     _locked_tol6(), "arm_edge2")
+    fg.add_edge("arm2",  "exit2",  ry_nom,      _locked_tol6(), "ry_edge2")
+
+    target = _lever_target(b_trans=0.05, b_rx=0.20, b_rz=0.10)
+    targets = [("base", "exit", target), ("base2", "exit2", target)]
+
+    result = AllocationEngine.allocate_multi(
+        fg, targets,
+        objective=LoosestAllocation(),
+        n_validate=1000, gamma=0.9, max_iter=20, seed=42,
+    )
+
+    assert result.converged, (
+        f"allocate_multi must converge on two lever-arm pairs; got: {result.status_message}"
+    )
+    assert result.per_pair_validation is not None
+    assert len(result.per_pair_validation) == 2
+
+    for fa, fb, vr in result.per_pair_validation:
+        assert vr.passed, (
+            f"Pair {fa}→{fb} must pass validation; failing DoFs: "
+            f"{[k for k, v in vr.per_dof_pass.items() if not v]}"
+        )
 

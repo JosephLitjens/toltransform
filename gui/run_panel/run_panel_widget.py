@@ -8,7 +8,7 @@ the FrameGraph and never touches the ProjectModel.
 
 Modes:
   FK Verification — MonteCarloFKEngine.run() → TrialData
-  IK Allocation   — AllocationEngine.allocate() → AllocationResult
+  IK Allocation   — AllocationEngine.allocate_multi() → AllocationResult
 
 SimSettings (mode, n_trials, seed) are written back to project.sim_settings on
 every change so they persist with the project file.
@@ -21,6 +21,7 @@ import random
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -36,10 +37,107 @@ from PySide6.QtWidgets import (
 
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from persistence.schema import ProjectModel, project_model_to_frame_graph
-from sim.allocation import AllocationEngine, AllocationResult, EqualAllocation, LoosestAllocation, RSSAllocation
+from sim.allocation import (
+    AllocationEngine,
+    AllocationResult,
+    EqualAllocation,
+    LoosestAllocation,
+    RSSAllocation,
+)
 from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData
 
 _DOF_NAMES = ("dx", "dy", "dz", "rx", "ry", "rz")
+
+
+# ── Constraint row widget ─────────────────────────────────────────────────────
+
+class _ConstraintRowWidget(QWidget):
+    """One (frame_a → frame_b, target) row in the multi-pair IK constraint list."""
+
+    removed = Signal(object)  # emits self; connected by RunPanelWidget
+
+    def __init__(self, frame_names: list[str], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._build_ui(frame_names)
+
+    def _build_ui(self, frame_names: list[str]) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(2)
+
+        # ── Frame pair row ────────────────────────────────────────────────────
+        pair_row = QHBoxLayout()
+        pair_row.addWidget(QLabel("A:"))
+        self._frame_a_combo = QComboBox()
+        self._frame_a_combo.setMinimumWidth(90)
+        for name in frame_names:
+            self._frame_a_combo.addItem(name)
+        pair_row.addWidget(self._frame_a_combo, stretch=1)
+
+        pair_row.addWidget(QLabel("→  B:"))
+        self._frame_b_combo = QComboBox()
+        self._frame_b_combo.setMinimumWidth(90)
+        for name in frame_names:
+            self._frame_b_combo.addItem(name)
+        if self._frame_b_combo.count() >= 2:
+            self._frame_b_combo.setCurrentIndex(1)
+        pair_row.addWidget(self._frame_b_combo, stretch=1)
+
+        self._remove_btn = QPushButton("✕")
+        self._remove_btn.setMaximumWidth(28)
+        self._remove_btn.setToolTip("Remove this constraint")
+        self._remove_btn.clicked.connect(lambda: self.removed.emit(self))
+        pair_row.addWidget(self._remove_btn)
+        layout.addLayout(pair_row)
+
+        # ── Target spinboxes ──────────────────────────────────────────────────
+        target_grid = QGridLayout()
+        target_grid.setHorizontalSpacing(4)
+        target_grid.setVerticalSpacing(1)
+        self._spins: list[QDoubleSpinBox] = []
+        for i, dof in enumerate(_DOF_NAMES):
+            col = (i % 3) * 2
+            row = i // 3
+            target_grid.addWidget(QLabel(f"{dof}:"), row, col, Qt.AlignmentFlag.AlignRight)
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 9999.0)
+            spin.setDecimals(6)
+            spin.setSingleStep(0.0001)
+            spin.setValue(0.001)
+            spin.setMinimumWidth(80)
+            target_grid.addWidget(spin, row, col + 1)
+            self._spins.append(spin)
+        layout.addLayout(target_grid)
+
+        # ── Separator ─────────────────────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep)
+
+    def refresh_frames(self, frame_names: list[str]) -> None:
+        for combo in (self._frame_a_combo, self._frame_b_combo):
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            for name in frame_names:
+                combo.addItem(name)
+            idx = combo.findText(current)
+            combo.setCurrentIndex(max(0, idx))
+            combo.blockSignals(False)
+
+    def set_remove_enabled(self, enabled: bool) -> None:
+        self._remove_btn.setEnabled(enabled)
+
+    def get_frame_pair(self) -> tuple[str, str]:
+        return self._frame_a_combo.currentText(), self._frame_b_combo.currentText()
+
+    def get_target(self) -> ToleranceSpec6:
+        specs = [
+            ToleranceSpec(distribution="uniform", bound=spin.value())
+            for spin in self._spins
+        ]
+        return ToleranceSpec6(*specs)
 
 
 # ── Background worker ─────────────────────────────────────────────────────────
@@ -56,9 +154,7 @@ class _RunWorker(QThread):
         frame_graph,
         n_trials: int,
         seed: int,
-        frame_a: str = "",
-        frame_b: str = "",
-        target_tol: ToleranceSpec6 | None = None,
+        ik_targets: list[tuple[str, str, ToleranceSpec6]] | None = None,
         objective=None,
         max_iter: int = 30,
         parent: QWidget | None = None,
@@ -68,9 +164,7 @@ class _RunWorker(QThread):
         self._frame_graph = frame_graph
         self._n_trials = n_trials
         self._seed = seed
-        self._frame_a = frame_a
-        self._frame_b = frame_b
-        self._target_tol = target_tol
+        self._ik_targets = ik_targets or []
         self._objective = objective
         self._max_iter = max_iter
 
@@ -81,11 +175,9 @@ class _RunWorker(QThread):
                     self._frame_graph, self._n_trials, self._seed
                 )
             else:
-                result = AllocationEngine.allocate(
+                result = AllocationEngine.allocate_multi(
                     self._frame_graph,
-                    self._frame_a,
-                    self._frame_b,
-                    self._target_tol,
+                    self._ik_targets,
                     objective=self._objective,
                     seed=self._seed,
                     n_validate=1000,
@@ -109,6 +201,7 @@ class RunPanelWidget(QWidget):
         super().__init__(parent)
         self._project: ProjectModel | None = None
         self._worker: _RunWorker | None = None
+        self._constraint_rows: list[_ConstraintRowWidget] = []
         self._setup_ui()
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -116,11 +209,11 @@ class RunPanelWidget(QWidget):
     def set_project(self, project: ProjectModel) -> None:
         self._project = project
         self._load_sim_settings()
-        self._refresh_frame_combos()
+        self._refresh_all_constraint_frames()
 
     def refresh_view(self) -> None:
         """Re-populate IK frame combos — call when frames are added/removed."""
-        self._refresh_frame_combos()
+        self._refresh_all_constraint_frames()
 
     # ── UI construction ────────────────────────────────────────────────────────
 
@@ -199,20 +292,10 @@ class RunPanelWidget(QWidget):
         return group
 
     def _build_ik_group(self) -> QGroupBox:
-        self._ik_group = QGroupBox("IK Target")
+        self._ik_group = QGroupBox("IK Allocation")
         layout = QVBoxLayout(self._ik_group)
 
-        frame_row = QHBoxLayout()
-        frame_row.addWidget(QLabel("Frame A:"))
-        self._frame_a_combo = QComboBox()
-        self._frame_a_combo.setMinimumWidth(100)
-        frame_row.addWidget(self._frame_a_combo, stretch=1)
-        frame_row.addWidget(QLabel("Frame B:"))
-        self._frame_b_combo = QComboBox()
-        self._frame_b_combo.setMinimumWidth(100)
-        frame_row.addWidget(self._frame_b_combo, stretch=1)
-        layout.addLayout(frame_row)
-
+        # ── Method + iterations ───────────────────────────────────────────────
         method_row = QHBoxLayout()
         method_row.addWidget(QLabel("Method:"))
         self._method_combo = QComboBox()
@@ -234,25 +317,61 @@ class RunPanelWidget(QWidget):
         iter_row.addWidget(self._max_iter_spin, stretch=1)
         layout.addLayout(iter_row)
 
-        # Target bound table
-        grid = QGridLayout()
-        grid.addWidget(QLabel("<b>DoF</b>"), 0, 0, Qt.AlignmentFlag.AlignCenter)
-        grid.addWidget(QLabel("<b>Target Bound</b>"), 0, 1, Qt.AlignmentFlag.AlignCenter)
+        # ── Constraint list ───────────────────────────────────────────────────
+        constraints_label = QLabel("<b>Point-Pair Constraints</b>")
+        layout.addWidget(constraints_label)
 
-        self._target_bound_spins: list[QDoubleSpinBox] = []
-        for i, dof_name in enumerate(_DOF_NAMES):
-            grid.addWidget(QLabel(f"<b>{dof_name}</b>"), i + 1, 0, Qt.AlignmentFlag.AlignCenter)
-            spin = QDoubleSpinBox()
-            spin.setRange(0.0, 9999.0)
-            spin.setDecimals(6)
-            spin.setSingleStep(0.0001)
-            spin.setValue(0.001)
-            grid.addWidget(spin, i + 1, 1)
-            self._target_bound_spins.append(spin)
+        self._constraints_container = QWidget()
+        self._constraints_layout = QVBoxLayout(self._constraints_container)
+        self._constraints_layout.setContentsMargins(0, 0, 0, 0)
+        self._constraints_layout.setSpacing(0)
+        layout.addWidget(self._constraints_container)
 
-        layout.addLayout(grid)
+        self._add_constraint_btn = QPushButton("+ Add Constraint")
+        self._add_constraint_btn.clicked.connect(self._on_add_constraint)
+        layout.addWidget(self._add_constraint_btn)
+
+        # Seed the list with one row
+        self._add_constraint_row()
+
         self._ik_group.setVisible(False)
         return self._ik_group
+
+    # ── Constraint row management ─────────────────────────────────────────────
+
+    def _add_constraint_row(self) -> None:
+        frame_names = self._current_frame_names()
+        row = _ConstraintRowWidget(frame_names, parent=self._constraints_container)
+        row.removed.connect(self._on_remove_constraint)
+        self._constraints_layout.addWidget(row)
+        self._constraint_rows.append(row)
+        self._update_remove_buttons()
+
+    def _on_add_constraint(self) -> None:
+        self._add_constraint_row()
+
+    def _on_remove_constraint(self, row: _ConstraintRowWidget) -> None:
+        if len(self._constraint_rows) <= 1:
+            return
+        self._constraint_rows.remove(row)
+        self._constraints_layout.removeWidget(row)
+        row.deleteLater()
+        self._update_remove_buttons()
+
+    def _update_remove_buttons(self) -> None:
+        only_one = len(self._constraint_rows) == 1
+        for row in self._constraint_rows:
+            row.set_remove_enabled(not only_one)
+
+    def _current_frame_names(self) -> list[str]:
+        if self._project is None:
+            return []
+        return [f.name for f in self._project.frames]
+
+    def _refresh_all_constraint_frames(self) -> None:
+        frame_names = self._current_frame_names()
+        for row in self._constraint_rows:
+            row.refresh_frames(frame_names)
 
     # ── Internal state ─────────────────────────────────────────────────────────
 
@@ -271,22 +390,6 @@ class RunPanelWidget(QWidget):
             w.blockSignals(False)
         self._update_ik_group_visibility()
 
-    def _refresh_frame_combos(self) -> None:
-        for combo in (self._frame_a_combo, self._frame_b_combo):
-            combo.blockSignals(True)
-            current = combo.currentText()
-            combo.clear()
-            if self._project:
-                for frame in self._project.frames:
-                    combo.addItem(frame.name)
-            idx = combo.findText(current)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
-            combo.blockSignals(False)
-        # Default frame B to index 1 if available (avoids frame_a == frame_b on first load)
-        if self._frame_b_combo.count() >= 2 and self._frame_b_combo.currentIndex() == 0:
-            self._frame_b_combo.setCurrentIndex(1)
-
     def _update_ik_group_visibility(self) -> None:
         self._ik_group.setVisible(
             self._mode_combo.currentData() == "ik_allocation"
@@ -301,12 +404,21 @@ class RunPanelWidget(QWidget):
             self._status_label.setStyleSheet("")
         self._status_label.setText(text)
 
-    def _get_target_tol(self) -> ToleranceSpec6:
-        specs = [
-            ToleranceSpec(distribution="uniform", bound=spin.value())
-            for spin in self._target_bound_spins
-        ]
-        return ToleranceSpec6(*specs)
+    def _collect_ik_targets(self) -> list[tuple[str, str, ToleranceSpec6]] | None:
+        """Collect and validate all constraint rows. Returns None on error."""
+        targets: list[tuple[str, str, ToleranceSpec6]] = []
+        for i, row in enumerate(self._constraint_rows):
+            frame_a, frame_b = row.get_frame_pair()
+            if not frame_a or not frame_b:
+                self._set_status(f"Error: constraint {i + 1} has no frames selected", error=True)
+                return None
+            if frame_a == frame_b:
+                self._set_status(
+                    f"Error: constraint {i + 1} — Frame A and Frame B must differ", error=True
+                )
+                return None
+            targets.append((frame_a, frame_b, row.get_target()))
+        return targets
 
     # ── Signal handlers ────────────────────────────────────────────────────────
 
@@ -341,16 +453,14 @@ class RunPanelWidget(QWidget):
         n_trials = self._n_trials_spin.value()
         seed = self._seed_spin.value()
 
+        ik_targets = None
+        objective = None
+        max_iter = 30
+
         if mode == "ik_allocation":
-            frame_a = self._frame_a_combo.currentText()
-            frame_b = self._frame_b_combo.currentText()
-            if not frame_a or not frame_b:
-                self._set_status("Error: select Frame A and Frame B", error=True)
+            ik_targets = self._collect_ik_targets()
+            if ik_targets is None:
                 return
-            if frame_a == frame_b:
-                self._set_status("Error: Frame A and Frame B must be different", error=True)
-                return
-            target_tol = self._get_target_tol()
             max_iter = self._max_iter_spin.value()
             _method = self._method_combo.currentData()
             objective = (
@@ -358,11 +468,6 @@ class RunPanelWidget(QWidget):
                 else RSSAllocation() if _method == "rss"
                 else EqualAllocation()
             )
-        else:
-            frame_a = frame_b = ""
-            target_tol = None
-            objective = None
-            max_iter = 30
 
         try:
             frame_graph = project_model_to_frame_graph(self._project)
@@ -379,9 +484,7 @@ class RunPanelWidget(QWidget):
             frame_graph=frame_graph,
             n_trials=n_trials,
             seed=seed,
-            frame_a=frame_a,
-            frame_b=frame_b,
-            target_tol=target_tol,
+            ik_targets=ik_targets,
             objective=objective,
             max_iter=max_iter,
             parent=self,
@@ -398,13 +501,17 @@ class RunPanelWidget(QWidget):
         if isinstance(result, TrialData):
             self._set_status(f"FK complete — {result.n_trials:,} trials (seed {result.seed})")
         elif isinstance(result, AllocationResult):
+            n = len(self._constraint_rows)
+            pair_label = f"{n} constraint{'s' if n > 1 else ''}"
             if result.converged:
                 self._set_status(
                     f"IK complete — converged in {result.iterations_used} iteration(s)"
+                    f"  [{pair_label}]"
                 )
             else:
                 self._set_status(
-                    f"IK allocation did not converge ({result.iterations_used} iterations)",
+                    f"IK allocation did not converge ({result.iterations_used} iterations)"
+                    f"  [{pair_label}]",
                     warning=True,
                 )
         self.run_completed.emit(result)
