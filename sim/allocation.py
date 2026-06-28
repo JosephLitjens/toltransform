@@ -47,6 +47,7 @@ class AllocationResult:
     iterations_used: int
     status_message: str
     final_validation_report: ValidationReport
+    target_tolerance: ToleranceSpec6 | None = None
 
 
 # ── Allocation objective interface ────────────────────────────────────────────
@@ -311,6 +312,7 @@ class AllocationEngine:
                 iterations_used=0,
                 status_message="",
                 final_validation_report=report,
+                target_tolerance=target_tolerance,
             )
 
         current = copy.deepcopy(baseline)
@@ -327,6 +329,7 @@ class AllocationEngine:
                     iterations_used=iteration + 1,
                     status_message="",
                     final_validation_report=report,
+                    target_tolerance=target_tolerance,
                 )
 
         return AllocationResult(
@@ -336,4 +339,5 @@ class AllocationEngine:
             iterations_used=max_iter,
             status_message="Allocation could not converge to target budget",
             final_validation_report=report,
+            target_tolerance=target_tolerance,
         )

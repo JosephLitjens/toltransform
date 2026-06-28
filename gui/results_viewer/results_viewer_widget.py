@@ -211,8 +211,10 @@ class ResultsViewerWidget(QWidget):
 
         achieved_group = QGroupBox("Achieved Envelope vs. Target")
         achieved_layout = QVBoxLayout(achieved_group)
-        self._achieved_table = QTableWidget(6, 4)
-        self._achieved_table.setHorizontalHeaderLabels(["DoF", "Min", "Max", "Pass?"])
+        self._achieved_table = QTableWidget(6, 5)
+        self._achieved_table.setHorizontalHeaderLabels(
+            ["DoF", "Target ±", "Min", "Max", "Pass?"]
+        )
         self._achieved_table.verticalHeader().setVisible(False)
         self._achieved_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
@@ -312,15 +314,18 @@ class ResultsViewerWidget(QWidget):
                 self._alloc_table.setItem(row, col + 1, item)
 
         vr = result.final_validation_report
-        for row, dof in enumerate(DOF_LABELS):
+        target = result.target_tolerance
+        for row, (dof, i) in enumerate(zip(DOF_LABELS, range(6))):
             d = vr.achieved_envelope.get(dof, {})
             passed = vr.per_dof_pass.get(dof, False)
             self._achieved_table.setItem(row, 0, _ro_item(dof))
-            self._achieved_table.setItem(row, 1, _ro_item(f"{d.get('min', 0.0):.6f}"))
-            self._achieved_table.setItem(row, 2, _ro_item(f"{d.get('max', 0.0):.6f}"))
+            target_str = f"±{target[i].bound:.6f}" if target is not None else "—"
+            self._achieved_table.setItem(row, 1, _ro_item(target_str))
+            self._achieved_table.setItem(row, 2, _ro_item(f"{d.get('min', 0.0):.6f}"))
+            self._achieved_table.setItem(row, 3, _ro_item(f"{d.get('max', 0.0):.6f}"))
             pass_item = _ro_item("✓" if passed else "✗")
             pass_item.setForeground(QColor("green") if passed else QColor("red"))
-            self._achieved_table.setItem(row, 3, pass_item)
+            self._achieved_table.setItem(row, 4, pass_item)
 
         self._stack.setCurrentIndex(2)
 
