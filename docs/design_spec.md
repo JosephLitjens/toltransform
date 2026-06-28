@@ -2,7 +2,7 @@
 title: "TolTransform: Design Specifications & Project Plan"
 subtitle: "A Kinematic Error-Budgeting Tool for Precision Machine Design"
 author: "Living Engineering Document — Architecture, Module Specifications, and Phased Plan"
-date: "Last updated: 2026-06-25"
+date: "Last updated: 2026-06-28"
 geometry: margin=1in
 fontsize: 11pt
 toc: true
@@ -944,121 +944,281 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.13 `gui/main_window.py`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session. GUI modules are specified at a coarser grain than core/sim/postprocess/io, consistent with Section 10's rule that GUI work does not begin until the engine is proven — these task lists will be revisited and sharpened immediately before Milestone C begins (Section 7.4), once Milestones A, B-1, and B-2 are complete.)*
+*(Last revised: 2026-06-28 — Claude, C-1 through C-7 Milestone C implementation. **Implemented C-1 through C-7, commit `f1ffa2c` (C-6+C-7). Suite: 302 passed.** Original planning note (2026-06-23): GUI modules are specified at a coarser grain than core/sim/postprocess/io, consistent with Section 10's rule that GUI work does not begin until the engine is proven.)*
 
-**Responsibility:** Top-level PySide6 application window; owns the currently-loaded `ProjectModel`, hosts the other GUI panels, and owns save/load/new-project actions.
+**Responsibility:** Top-level `QMainWindow`; owns the currently-loaded `ProjectModel` in memory, hosts all five GUI panels as named `QDockWidget` instances, owns File menu actions (New/Open/Save/Save As/Exit), cross-panel signal routing, and session persistence via `QSettings`.
 
 **Deliverables:**
 
-- Main `QMainWindow` subclass with menu bar (New/Open/Save/Save As/Exit)
-- Docked or tabbed hosting of the panels in Sections 6.14–6.18
-- A single in-memory `ProjectModel` instance treated as the source of truth for the currently open project
+- `QMainWindow` subclass with menu bar, status bar, and five tabbed/docked panels
+- File → New / Open / Open Recent (with history capped at 5) / Save / Save As / Exit
+- Single in-memory `ProjectModel` as source of truth; `_dirty` flag with title-bar asterisk
+- `QSettings("TolTransform", "TolTransform")` persistence of window geometry, dock layout, and recent-file list across sessions
 
-**Granular Task List (to be sharpened before Milestone C):**
-1. Implement the `QMainWindow` shell with a menu bar and status bar.
-2. Implement New/Open/Save/Save As actions, calling `persistence/serializer.py` directly (Section 5.3 — GUI talks to `persistence.schema` only).
-3. Implement a simple in-memory "dirty" flag (unsaved changes indicator) tied to edits made in any child panel.
-4. Lay out the child panels (Sections 6.14–6.18) as dock widgets or tabs — decide layout once those panels' own specs are sharpened immediately before Milestone C.
-5. Wire a top-level error-display mechanism (e.g., a status bar message or modal dialog) for surfacing `ProjectLoadError` and validation errors from `persistence/serializer.py` / `persistence/schema.py` in a user-friendly way.
+**Implemented Architecture:**
+
+- `_project: ProjectModel` — the single live project instance. Never directly passed to engine code; only child panels and `persistence/serializer.py` touch it.
+- `_path: str | None` — current file path (`None` for unsaved projects).
+- `_dirty: bool` — set True on any `project_changed` signal; cleared on save or new/open.
+- `_recent_files: list[str]` — capped at `_MAX_RECENT = 5`, deduplicated on add, missing files removed gracefully on open attempt.
+- `_last_run_result: object` — last FK/IK result; used to re-route to panels on demand (not currently displayed; available for future use).
+- Dock layout (all `QDockWidget`): **Left** = Graph Editor; **Right** (tabbed/stacked) = Tolerance Editor, Run Panel, Results Viewer, Point-Pair Analysis.
+- Each dock has a stable `setObjectName(...)` so `QMainWindow.restoreState()` can re-identify them after a layout change between sessions.
+
+**Key signal wiring (cross-panel integration):**
+
+| Signal source | Signal | Receiver(s) |
+|---|---|---|
+| `GraphEditorWidget` | `project_changed` | `_on_graph_editor_changed()` → sets dirty, calls `refresh_view()` on Tolerance Editor, Run Panel, Point-Pair Panel |
+| `GraphEditorWidget` | `edge_selected(str)` | `ToleranceEditorWidget.set_selected_edge(str)` — clicking an edge in the graph auto-selects it in the tolerance editor |
+| `ToleranceEditorWidget` | `project_changed` | `_on_project_changed()` → sets dirty |
+| `RunPanelWidget` | `project_changed` | `_on_project_changed()` → sets dirty |
+| `RunPanelWidget` | `run_completed(object)` | `_on_run_completed()` → routes to `ResultsViewerWidget.set_result()` AND `PointPairPanelWidget.set_result()` |
+| `RunPanelWidget` | `run_failed(str)` | `_on_run_failed()` → no-op (run panel already shows error in its own status label) |
+| `PointPairPanelWidget` | `project_changed` | `_on_project_changed()` → sets dirty |
+
+**QSettings persistence (C-7):**
+
+- `_restore_settings()` called at end of `__init__()` (after `_setup_ui()`): restores window geometry, dock state, and recent-file list from the platform store.
+- `_save_settings()` called from `closeEvent()` before accepting: saves geometry, state, recent-file list.
+- `closeEvent()` checks `_confirm_discard_changes()` first; ignores the close event if the user clicks Cancel in the "save?" dialog.
+
+**Recent Files (C-7):**
+
+- `_rebuild_recent_menu()`: clears and repopulates `Open &Recent` submenu; shows `"(No recent files)"` (disabled) when list is empty; appends `"Clear Recent"` separator+action when non-empty.
+- `_add_recent(path)`: prepend → deduplicate → cap at 5 → rebuild menu. Called from `_open_project()` and `_save_project_as()`.
+- `_open_recent(path)`: same body as `_open_project()` but without the file dialog; removes the entry and shows `QMessageBox.critical` if the file no longer exists.
 
 **Interfaces:**
 
-- *Depends on:* `persistence/schema.py`, `persistence/serializer.py`, all `gui/*` panel modules, `PySide6`.
-- *Used by:* the application entry point (`main.py`, not yet listed in Section 5.1 — add it as the top-level launch script when Milestone C begins).
+- *Depends on:* `persistence/schema.py`, `persistence/serializer.py`, all `gui/*` panel modules, `PySide6.QtCore.QSettings`, `PySide6`.
+- *Used by:* the application entry point (`main.py`).
+- *Public API (for tests):*
+  ```
+  MainWindow._project: ProjectModel
+  MainWindow._on_graph_editor_changed() -> None
+  MainWindow._on_run_completed(result: object) -> None
+  MainWindow._new_project() -> None
+  MainWindow._open_project() -> None
+  _empty_project() -> ProjectModel   # module-level helper
+  ```
 
 ---
 
 ## 6.14 `gui/graph_editor/`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session. Coarse-grained per Section 6.13's note.)*
+*(Last revised: 2026-06-28 — Claude, C-1 Milestone C implementation. **Implemented C-1, commit `67f154e`. 19 tests in `tests/test_gui_graph_editor.py`.** Original planning note (2026-06-23): Coarse-grained per Section 6.13's note.)*
 
-**Responsibility:** Build/edit the Frame graph — add/remove Frames and Edges, enter each edge's nominal transform in any supported format.
+**Responsibility:** Build/edit the Frame graph — add/remove Frames and Edges, enter each edge's nominal transform in any supported format, emit `project_changed` and `edge_selected` signals to MainWindow.
 
-**Granular Task List (to be sharpened before Milestone C):**
-1. A graph/tree view widget listing Frames and Edges (likely `QTreeWidget` or a lightweight embedded NetworkX-to-Qt graph view — decide once this task is reached).
-2. An "Add Frame" / "Add Edge" dialog flow, writing directly into the in-memory `ProjectModel` (never into a live `FrameGraph`, per Section 5.3).
-3. A multi-format HTM entry widget supporting all four input representations (Section 2.1), with a format-selector control and live validation feedback (e.g., flagging a non-orthonormal raw-matrix entry immediately, reusing `core/transforms.py`'s `HTM` construction-time validation, Section 6.1 Step 3, as the validation backend).
-4. Visual indication of which Frame(s) are roots and which are junctions (shared by multiple downstream edges), to make the multi-chain structure legible to the user.
+**Deliverables:**
+
+- `GraphEditorWidget(QWidget)` — top-level panel; emits `project_changed` and `edge_selected(str)`.
+- `FrameEdgeTree(QTreeWidget)` — two-section tree ("Frames" / "Edges"), with root frames rendered bold blue (`[ROOT]` prefix) and junction frames orange (`[JUNCTION]` prefix). Refreshed from `ProjectModel` via `refresh(project)`.
+- `AddFrameDialog(QDialog)` — single name field; validates uniqueness; OK disabled until valid.
+- `AddEdgeDialog(QDialog)` — name field, parent/child combos, `HTMEntryWidget`; validates uniqueness and differing parent/child; OK gated on all fields valid.
+- `HTMEntryWidget(QWidget)` — multi-format nominal-transform entry with live validation (emits `validation_changed`).
+
+**Implemented Architecture:**
+
+- **`GraphEditorWidget`**: layout = `FrameEdgeTree` (stretch=1) + button row (`+ Frame`, `+ Edge`, `Delete Selected`). All mutations go to `self._project` (a `ProjectModel` reference) directly — no `FrameGraph` constructed here (Section 5.3). After every mutation, calls `refresh_view()` and emits `project_changed`.
+- **Deletion safety**: deleting a Frame checks for referencing edges first; if found, shows `QMessageBox.warning` and aborts. Edges may be deleted without checks.
+- **`FrameEdgeTree.selected_item_info()`**: returns `(name, kind)` tuple where `kind` is `"frame"` or `"edge"`, or `None` if no selectable item is highlighted. Root node items ("Frames", "Edges") have no `UserRole` data and return `None`.
+- **`HTMEntryWidget`**: `QComboBox` format selector + `QStackedWidget` (4 pages: XYZ+Euler, 4×4 Matrix, Quaternion+XYZ, Screw). Each page delegates validation to `core/transforms.py`'s `HTM` constructors via a `_validate()` call on every `valueChanged` signal. `validation_changed(bool)` emitted only when validity state flips. Bottom row of the matrix page is disabled (always `[0,0,0,1]`). `set_htm_input_model(model)` populates fields from an existing `HTMInputModel` for editing round-trips.
+- **New edges default to all-locked-zero tolerance** via `_default_tolerance()` — safe to simulate immediately without contributing error.
+- All content in `QScrollArea(widgetResizable=True, frameShape=NoFrame)` so docks can be resized to any height.
 
 **Interfaces:**
 
-- *Depends on:* `persistence/schema.py` (reads/writes `ProjectModel` directly), `core/transforms.py` (validation reuse), `PySide6`.
+- *Depends on:* `persistence/schema.py` (reads/writes `ProjectModel`), `core/transforms.py` (live HTM validation in `HTMEntryWidget._validate()`), `PySide6`.
 - *Used by:* `gui/main_window.py`.
+- *Public API:*
+  ```
+  GraphEditorWidget.set_project(project: ProjectModel) -> None
+  GraphEditorWidget.refresh_view() -> None
+  GraphEditorWidget.project_changed: Signal()
+  GraphEditorWidget.edge_selected: Signal(str)    # emits edge name on tree click
+  HTMEntryWidget.is_valid() -> bool
+  HTMEntryWidget.get_htm_input_model() -> HTMInputModel
+  HTMEntryWidget.set_htm_input_model(model: HTMInputModel) -> None
+  HTMEntryWidget.validation_changed: Signal(bool)
+  AddFrameDialog.result_frame() -> FrameModel      # only after Accepted
+  AddEdgeDialog.result_edge() -> HTMEdgeModel      # only after Accepted
+  FrameEdgeTree.refresh(project: ProjectModel) -> None
+  FrameEdgeTree.selected_item_info() -> tuple[str, str] | None
+  ```
 
 ---
 
 ## 6.15 `gui/tolerance_editor/`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session. Coarse-grained per Section 6.13's note.)*
+*(Last revised: 2026-06-28 — Claude, C-2 Milestone C implementation. **Implemented C-2, commit `33423f9`. 13 tests in `tests/test_gui_tolerance_editor.py`.**)* 
 
-**Responsibility:** Per-edge, per-DoF tolerance entry: distribution, bound, sigma-level, locked flag.
+**Responsibility:** Per-edge, per-DoF tolerance entry — distribution, bound, sigma-level, locked flag. Writes directly to the in-memory `ToleranceSpec6Model` on the selected edge; emits `project_changed` on every valid change.
 
-**Granular Task List (to be sharpened before Milestone C):**
-1. A per-edge panel exposing all 6 DoF, each with a distribution selector (`uniform`/`normal`), bound entry, conditionally-shown sigma-level entry (only when `normal` selected), and a locked checkbox.
-2. A "bulk apply" convenience action (e.g., "apply this distribution/sigma-level default to all DoF on this edge" or "...to all edges in this project") to avoid tedious repetitive entry — purely a UX nicety, not core to correctness.
-3. Live validation reusing `core/tolerance.py`'s `ToleranceSpec` construction-time checks (Section 6.2 Step 1).
+**Deliverables:**
+
+- `ToleranceEditorWidget(QWidget)` — edge selector combo + stacked widget (placeholder / DoF panel) + bulk-apply group.
+- `_DofRow` (internal helper, not a `QWidget`) — 6 rows of controls, one per DoF: distribution combo, bound spinbox, σ-level spinbox (enabled only when `"normal"` selected), locked checkbox, per-row error label.
+- "Bulk Apply" group: set distribution, bound, σ-level, apply to all 6 DoF of the current edge or to all edges in the project.
+
+**Implemented Architecture:**
+
+- **Layout**: `QScrollArea` wrapping a container `QWidget` containing: edge-selector row, `QStackedWidget` (page 0 = placeholder, page 1 = DoF grid), bulk-apply `QGroupBox`.
+- **Edge selector**: `QComboBox` populated from `project.edges`. Uses `activated` signal (not `currentIndexChanged`) so a re-click on the same edge still triggers a reload. Auto-selects the first edge on `set_project()` so the DoF grid appears immediately without requiring a user click.
+- **Live write-back**: every field change calls `_on_field_changed()`, which iterates all 6 rows, calls `_DofRow.is_valid()` on each (reusing `core.tolerance.ToleranceSpec` constructor as validator), writes valid specs back via `setattr(edge.tolerance, dof_name, row.get_model())`, then emits `project_changed`. Per-row error labels surface validation failures inline.
+- **Load guard**: `self._loading = True` during `_load_selected_edge()` and `_DofRow.load()` to suppress `_on_field_changed()` during batch widget population — prevents spurious dirty-flag sets.
+- **σ-level spinbox**: disabled (greyed out) when distribution is `"uniform"`; enabled only when `"normal"`. This is enforced in `_DofRow._on_dist_changed()` and on initial load.
+- **Bulk apply to edge**: applies bulk fields to all 6 DoF of the currently selected edge (preserves each DoF's `locked` flag). Calls `_DofRow.load()` to keep the grid in sync.
+- **Bulk apply to all edges**: iterates `project.edges`, updates all 6 DoF on every edge, preserves locked flags, reloads the current edge display.
+- **`set_selected_edge(name)`**: called by MainWindow when user clicks an edge in the graph editor tree; syncs the edge combo without re-triggering its `activated` signal.
+- All content in `QScrollArea(widgetResizable=True, frameShape=NoFrame)`.
 
 **Interfaces:**
 
-- *Depends on:* `persistence/schema.py`, `core/tolerance.py` (validation reuse), `PySide6`.
+- *Depends on:* `persistence/schema.py` (`ProjectModel`, `ToleranceSpecModel`), `core/tolerance.py` (`ToleranceSpec` — validation reuse only), `PySide6`.
 - *Used by:* `gui/main_window.py`.
+- *Public API:*
+  ```
+  ToleranceEditorWidget.set_project(project: ProjectModel) -> None
+  ToleranceEditorWidget.set_selected_edge(edge_name: str) -> None
+  ToleranceEditorWidget.refresh_view() -> None
+  ToleranceEditorWidget.project_changed: Signal()
+  ```
 
 ---
 
 ## 6.16 `gui/run_panel/`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session. Coarse-grained per Section 6.13's note.)*
+*(Last revised: 2026-06-28 — Claude, C-3 Milestone C implementation. **Implemented C-3, commit `d0457bd`. 11 tests in `tests/test_gui_run_panel.py`.**)* 
 
-**Responsibility:** Configure and trigger a simulation run: mode selection, trial count, seed, distribution settings.
+**Responsibility:** Configure and trigger a simulation run. **The one and only place where `persistence.schema` objects are converted into live `core`/`sim` objects** (Section 5.3). Runs the engine on a `QThread` background worker to keep the UI responsive. Writes SimSettings back to `project.sim_settings` on every field change so they persist with the project file.
 
-**Granular Task List (to be sharpened before Milestone C):**
-1. Mode selector (FK verification vs. IK allocation), with the panel's visible fields changing based on selection (e.g., IK mode additionally needs a target Frame pair + target tolerance entry, reusing the `gui/tolerance_editor/` widget for the target's bound entry).
-2. Trial count and seed entry, with the seed defaulting to a random value but always displayed/editable (so a specific run is always reproducible by recording the seed shown).
-3. A "Run" button that constructs live `core`/`sim` objects from the current `ProjectModel` (the one and only place this conversion happens, per Section 5.3) and invokes the appropriate engine (`MonteCarloFKEngine` or `AllocationEngine`), likely on a background thread/`QThread` to avoid freezing the UI during larger runs.
-4. Progress indication for longer runs (even a simple indeterminate spinner is acceptable for v1, given the modest trial counts in Section 5.1/13's performance targets).
+**Deliverables:**
+
+- `RunPanelWidget(QWidget)` — simulation settings + IK target group + Run button + progress bar + status label.
+- `_RunWorker(QThread)` — background FK or IK engine execution; emits `finished(object)` or `failed(str)`.
+
+**Implemented Architecture:**
+
+- **Mode selector** (`QComboBox`): "FK Verification" (`"fk_verification"`) and "IK Allocation" (`"ik_allocation"`). IK group (`self._ik_group`) is hidden when FK mode is active.
+- **SimSettings write-back**: mode, n_trials, and seed changes call `_on_mode_changed()` / `_on_n_trials_changed()` / `_on_seed_changed()` which update `project.sim_settings.*` in place and emit `project_changed`.
+- **Randomize button**: sets seed to `random.randint(0, 2**31 - 1)`.
+- **IK target group**: Frame A/B combos (`_frame_a_combo`, `_frame_b_combo`) + 6 `QDoubleSpinBox` target bounds, one per DoF. Defaults second combo to index 1 on populate to avoid A==B. Frame combos refreshed by `refresh_view()` when the graph changes.
+- **Run flow** (`_on_run_clicked()`):
+  1. Guard: no edges → error status, return.
+  2. IK guard: A==B or empty → error status, return.
+  3. `project_model_to_frame_graph(self._project)` — the only schema→core conversion in the GUI.
+  4. Disable Run button, show indeterminate progress bar, set status "Running…".
+  5. Construct `_RunWorker` with mode, graph, n_trials, seed, frame_a/b, target_tol.
+  6. Connect `finished`/`failed` → `deleteLater()` to avoid dangling worker references.
+  7. `worker.start()`.
+- **_RunWorker.run()**: dispatches to `MonteCarloFKEngine.run()` (FK) or `AllocationEngine.allocate()` (IK with `n_validate=1000, seed=seed`). Emits `finished(result)` or `failed(str(exc))`.
+- **Completion** (`_on_run_finished()`): re-enables Run button, hides progress bar, sets status message (FK: trial count + seed; IK: converged vs. non-converged with iteration count), emits `run_completed(result)`.
+- **Failure** (`_on_run_failed()`): re-enables Run button, hides progress bar, sets red error status, emits `run_failed(error)`.
+- All content in `QScrollArea(widgetResizable=True, frameShape=NoFrame)`.
 
 **Interfaces:**
 
-- *Depends on:* `persistence/schema.py`, `core/frame_graph.py`, `sim/monte_carlo_fk.py`, `sim/allocation.py`, `PySide6`.
-- *Used by:* `gui/main_window.py`; produces the `TrialData`/`ValidationReport` that `gui/results_viewer/` consumes.
+- *Depends on:* `persistence/schema.py` (`project_model_to_frame_graph`), `core/tolerance.py` (`ToleranceSpec`, `ToleranceSpec6`), `sim/monte_carlo_fk.py` (`MonteCarloFKEngine`), `sim/allocation.py` (`AllocationEngine`), `PySide6.QtCore.QThread`.
+- *Used by:* `gui/main_window.py`.
+- *Public API:*
+  ```
+  RunPanelWidget.set_project(project: ProjectModel) -> None
+  RunPanelWidget.refresh_view() -> None
+  RunPanelWidget.project_changed: Signal()
+  RunPanelWidget.run_completed: Signal(object)   # TrialData | AllocationResult
+  RunPanelWidget.run_failed: Signal(str)
+  RunPanelWidget._frame_a_combo: QComboBox        # for integration tests
+  RunPanelWidget._frame_b_combo: QComboBox        # for integration tests
+  ```
 
 ---
 
 ## 6.17 `gui/results_viewer/`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session. Coarse-grained per Section 6.13's note.)*
+*(Last revised: 2026-06-28 — Claude, C-4 Milestone C implementation. **Implemented C-4, commit `63cd2ea`. 11 tests in `tests/test_gui_results_viewer.py`. Matplotlib figures open in standalone `_FigureWindow` instances (not embedded in the dock) — see Key Decisions below.**)* 
 
-**Responsibility:** Display simulation results — envelope tables, histograms, 2D bounding-shape projections — per Frame or per saved point-pair analysis.
+**Responsibility:** Display FK or IK simulation results. Read-only — no signals out, no project write-back. MainWindow calls `set_result(result, project)` after each run and `clear()` on New/Open.
 
-**Granular Task List (to be sharpened before Milestone C):**
-1. A Frame/analysis selector driving which result set is currently displayed.
-2. An envelope summary table (reusing `postprocess/stats.py`'s `frame_envelope_box`/`point_pair_envelope_box` output directly).
-3. Embedded Matplotlib canvases (via `matplotlib.backends.backend_qtagg`) displaying `postprocess/reporting.py`'s `generate_frame_report()` output — reuse the plotting module's Figures directly rather than re-implementing plotting in Qt-native widgets.
-4. Display of rotation error per the locked 2026-06-23 decision: the bounding cone (`max_angle`, `mean_axis`) is the headline figure for angular uncertainty, with the per-axis box available as a secondary/expandable detail (e.g., a "show per-axis breakdown" toggle) rather than displayed with equal visual weight.
+**Deliverables:**
+
+- `ResultsViewerWidget(QWidget)` — `QStackedWidget` with three pages: placeholder (page 0), FK page (page 1), IK page (page 2).
+- `_FigureWindow(QWidget)` — standalone OS window hosting a Matplotlib `FigureCanvasQTAgg`; closed via `plt.close(fig)` on `closeEvent`.
+- FK page: frame selector combo → envelope table (6×3 DoF/Min/Max); "Open Frame Report in New Window" button (disabled until FK result arrives); Pareto sensitivity group (Frame A/B combos + "Compute & Open" button).
+- IK page: convergence status label (green/orange); corrected allocation table (edge × DoF, locked DoF shown as `"—"` in gray, tooltip showing baseline bound on changed cells); achieved envelope vs. target table (DoF/Min/Max/Pass? with pass cells in green/red).
+
+**Implemented Architecture:**
+
+- **`_FigureWindow`**: `QWidget` with `Qt.WindowType.Window` flag (opens as a separate OS window, not a child widget). Layout: `QVBoxLayout` → `FigureCanvasQTAgg`. Title set to e.g. `"Frame Report: sensor"`. `resize(1200, 900)`. `closeEvent` calls `plt.close(self._fig)` then `super()`. References held in `self._open_windows: list[_FigureWindow]` on the parent widget to prevent garbage collection.
+- **Key design decision — standalone windows instead of embedded canvases**: The original C-4 design embedded `FigureCanvasQTAgg` directly in the dock widget. This caused plots to be invisible at typical dock sizes (Matplotlib canvas minimum size constraints conflict with dock widget height limits). Fixed by switching to `_FigureWindow` standalone windows for all plots. The button "Open Frame Report in New Window" makes this explicit to the user.
+- **FK page flow**:
+  1. `_show_fk(trial_data)` populates all combos, switches to page 1, immediately calls `_update_fk_display(frame_names[0])`.
+  2. `_update_fk_display(name)` calls `frame_envelope_box()` → fills 6×3 table → enables `_view_report_btn`.
+  3. `_on_view_report_clicked()` → `generate_frame_report(trial_data, name)` → `_FigureWindow` → `win.show()`.
+  4. `_compute_pareto()` → `compute_tolerance_sensitivities()` + `generate_sensitivity_report()` → `_FigureWindow` → `win.show()`.
+- **IK page**: `_show_ik(result)` populates corrected-allocation table (iterating `DOF_LABELS`, checking `locked` and computing baseline diff for tooltip), achieved-envelope table with pass/fail coloring, convergence status label.
+- **`clear()`**: calls `_close_windows()` (closes all open `_FigureWindow` instances, ignoring `RuntimeError` if already destroyed), resets `_stack.currentIndex(0)`.
+- **`_scrollable(inner)`**: module-level helper creating a `QScrollArea(widgetResizable=True, frameShape=NoFrame)` — used to wrap both FK and IK pages so they scroll rather than clipping at small dock heights.
 
 **Interfaces:**
 
-- *Depends on:* `postprocess/stats.py`, `postprocess/reporting.py`, `PySide6`, `matplotlib`.
+- *Depends on:* `postprocess/stats.py` (`frame_envelope_box`, `compute_tolerance_sensitivities`), `postprocess/reporting.py` (`generate_frame_report`, `generate_sensitivity_report`), `persistence/schema.py` (`project_model_to_frame_graph`), `sim/monte_carlo_fk.py` (`TrialData`), `sim/allocation.py` (`AllocationResult`), `matplotlib`, `PySide6`.
 - *Used by:* `gui/main_window.py`.
+- *Public API:*
+  ```
+  ResultsViewerWidget.set_result(result: object, project: ProjectModel) -> None
+  ResultsViewerWidget.clear() -> None
+  ResultsViewerWidget._stack: QStackedWidget          # for integration tests (currentIndex)
+  ResultsViewerWidget._view_report_btn: QPushButton   # for unit tests (isEnabled)
+  ```
 
 ---
 
 ## 6.18 `gui/point_pair_panel/`
 
-*(Last revised: 2026-06-23 — Claude, detailed planning session. Coarse-grained per Section 6.13's note.)*
+*(Last revised: 2026-06-28 — Claude, C-5 Milestone C implementation. **Implemented C-5, commit `63cd2ea`. 11 tests in `tests/test_gui_point_pair_panel.py`.**)* 
 
-**Responsibility:** Define and persist point-pair analyses — select any two Frames, view their relative-pose envelope, save the analysis definition into the project file.
+**Responsibility:** Read-write panel for named `(frame_a, frame_b)` analyses. Saves/deletes `SavedAnalysisModel` entries from `project.saved_analyses`, emits `project_changed` on each mutation. When a FK `TrialData` result is available and the selected pair is connected, computes and shows the relative-pose envelope via `point_pair_envelope_box()`. `AllocationResult` is silently ignored (FK trial data is required for the envelope).
 
-**Granular Task List (to be sharpened before Milestone C):**
-1. A two-Frame selector (dropdowns or graph-click selection, reusing the Frame list from `gui/graph_editor/`'s underlying `ProjectModel`).
-2. A "Save Analysis" action writing a new `SavedAnalysisModel` entry into the `ProjectModel` (Section 6.11 Step 7), so it persists across save/load.
-3. Display of the resulting relative-pose envelope, reusing `gui/results_viewer/`'s display components rather than duplicating presentation logic.
-4. A same-component validation check at selection time (reusing `core/frame_graph.py`'s `weakly_connected_components()`), giving immediate UI feedback (e.g., greying out an invalid second-Frame selection) rather than only erroring after a run.
+**Deliverables:**
+
+- `PointPairPanelWidget(QWidget)` — Frame Pair group + Saved Analyses group + Relative-Pose Envelope group, all inside a `QScrollArea`.
+- Module-level `_are_connected(project, frame_a, frame_b) -> bool` — builds a `networkx.Graph` directly from `project.frames` and `project.edges` (Section 5.3 compliant: no `FrameGraph` constructed, pure schema objects), then calls `nx.has_path()`.
+
+**Implemented Architecture:**
+
+- **Frame Pair group**: Frame A combo + Frame B combo (horizontal row), connectivity warning label (red), name edit, "Save Analysis" button (max width 110), save-error label. On any combo change, `_on_selection_changed()` runs:
+  - Empty combo → clear warning, disable Save.
+  - A == B → "Frame A and Frame B must be different.", disable Save.
+  - Not connected → "Frames '…' and '…' are not connected.", disable Save.
+  - Connected → clear warning, enable Save, auto-populate name as `f"{frame_a} → {frame_b}"`, clear save-error label.
+- **Saved Analyses group**: `QListWidget` (max height 130) showing `"{name}  ({frame_a} → {frame_b})"` entries; "Delete Selected" button. `currentRowChanged` → `_on_saved_row_changed(row)` which loads the saved analysis's combos using `combo.blockSignals(True)` to avoid re-triggering selection validation during the load. `_on_delete_clicked()` pops the row from `project.saved_analyses` and calls `takeItem(row)` on the list widget directly (no full re-population needed) then emits `project_changed`.
+- **Relative-Pose Envelope group**: placeholder label ("Run FK simulation…", gray italic) and 6×3 `QTableWidget` (DoF/Min/Max, max height 210, read-only items). Placeholder and table are mutually exclusive — `_update_envelope()` shows the table only when `_trial_data` is not None and the current pair is connected. `_fill_envelope_table()` formats values to 6 decimal places.
+- **`_update_envelope()`** calls `project_model_to_frame_graph()` and `point_pair_envelope_box()` — this is the one place in this panel that constructs core objects, and it is called only at display time (after a run), not during editing.
+- **`set_project(project)`**: resets `_trial_data = None`, repopulates combos (preserving current selection by name), repopulates saved-analysis list, calls `_update_envelope()`.
+- **`set_result(result)`**: accepts only `TrialData`; stores it in `_trial_data`; calls `_update_envelope()`. `AllocationResult` passed through without effect.
+- **`refresh_view()`**: repopulates frame combos after frames are added/removed (called by MainWindow on `_on_graph_editor_changed()`). Calls `_update_envelope()`.
+- **`clear()`**: sets `_trial_data = None`, calls `_update_envelope()` (hides table, shows placeholder). Preserves project reference and combos.
+- **`_repopulate_frame_combos()`**: uses `blockSignals(True)` on both combos while clearing/refilling, then restores previous selection by name (`findText()`), then defaults `_frame_b_combo` to index 1 (not index 0) to avoid A==B on first load.
+- All content in `QScrollArea(widgetResizable=True, frameShape=NoFrame)`.
+
+**Key design decision — Section 5.3 compliance for connectivity check**: `_are_connected()` uses `networkx.Graph` built directly from `project.frames` and `project.edges` (Pydantic models), never calling `project_model_to_frame_graph()` at selection time. This avoids constructing `core.FrameGraph` / `core.HTMEdge` objects during editing, honoring Section 5.3's rule that core objects are only constructed at run time.
 
 **Interfaces:**
 
-- *Depends on:* `persistence/schema.py`, `core/frame_graph.py`, `postprocess/stats.py`, `gui/results_viewer/` (shared display components), `PySide6`.
+- *Depends on:* `persistence/schema.py` (`ProjectModel`, `SavedAnalysisModel`, `project_model_to_frame_graph`), `postprocess/stats.py` (`point_pair_envelope_box`, `DOF_LABELS`), `sim/monte_carlo_fk.py` (`TrialData`), `networkx`, `PySide6`.
 - *Used by:* `gui/main_window.py`.
+- *Public API:*
+  ```
+  PointPairPanelWidget.set_project(project: ProjectModel) -> None
+  PointPairPanelWidget.set_result(result: object) -> None   # TrialData accepted; AllocationResult ignored
+  PointPairPanelWidget.refresh_view() -> None
+  PointPairPanelWidget.clear() -> None
+  PointPairPanelWidget.project_changed: Signal()
+  PointPairPanelWidget._frame_a_combo: QComboBox    # for integration tests
+  PointPairPanelWidget._trial_data: TrialData | None  # for integration tests
+  ```
 
 ---
 
@@ -1089,7 +1249,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.20 `tests/`
 
-*(Last revised: 2026-06-25 — Claude, B1-2 through B1-5 implementations. All four B1 test files now implemented. **220 passed, 1 skipped.** Root `conftest.py` added (not to be confused with `tests/conftest.py`) to work around stdlib `io` name collision — see Section 6.12 implementation notes. Original A6 note: Global tolerance convention established: `DEFAULT_ATOL=1e-9` (exact composition checks), `SMALL_ANGLE_ATOL=1e-6` (checks where trig residuals at ~1 mrad apply). Three shared fixtures in `tests/conftest.py`: `two_edge_chain`, `three_edge_chain`, `shared_frame_graph`. Integration tests cover: two-edge translation stack-up (exact), rotation→translation cross-coupling/lever-arm (hand-verified small-angle derivation), local-frame perturbation routing through nominal rotation. `test_shared_edge_sampling_consistency` written as required module-level function per Section 9 Item 3. `test_allocation_mc_validation_discrepancy` placeholder added to `test_allocation.py` per Section 9 Item 4 (`pytest.mark.skip` until B-2). README.md has CI entry point.)*
+*(Last revised: 2026-06-28 — Claude, Milestone C GUI test files added. **Suite: 302 passed, 0 skipped.** Prior: B1-2 through B1-5 implementations; all four B1 test files implemented, **220 passed, 1 skipped.** Root `conftest.py` added (not to be confused with `tests/conftest.py`) to work around stdlib `io` name collision — deleted after rename to `persistence/` (2026-06-27). Original A6 note: Global tolerance convention established: `DEFAULT_ATOL=1e-9` (exact composition checks), `SMALL_ANGLE_ATOL=1e-6` (checks where trig residuals at ~1 mrad apply). Three shared fixtures in `tests/conftest.py`: `two_edge_chain`, `three_edge_chain`, `shared_frame_graph`. Integration tests cover: two-edge translation stack-up (exact), rotation→translation cross-coupling/lever-arm (hand-verified small-angle derivation), local-frame perturbation routing through nominal rotation. `test_shared_edge_sampling_consistency` written as required module-level function per Section 9 Item 3. `test_allocation_mc_validation_discrepancy` placeholder added to `test_allocation.py` per Section 9 Item 4 (`pytest.mark.skip` until B-2). README.md has CI entry point.)*
 
 **Responsibility:** The full unit/integration test suite. Houses every hand-calculable validation case described per-module above, plus the dedicated cross-cutting regression tests called out in Section 9.
 
@@ -1122,12 +1282,29 @@ The root-level `conftest.py` (stdlib `io` name-collision workaround) was deleted
 **✅ Milestone B-2 complete:**
 - `test_allocation.py` — ✅ B2-3 (`0c9bd9d`): 7 real tests (placeholder removed)
 
+**✅ Implemented (Milestone C — GUI tests):**
+
+All GUI tests use `os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")` at module top (before any Qt import) and `qtbot.addWidget(widget)` for lifecycle management. A critical headless-Qt invariant applies: **`isHidden()` must be used instead of `isVisible()` for checking widget visibility in offscreen tests.** `QWidget.isVisible()` checks the entire ancestor chain and returns False for all children when the parent window is not shown (which is always the case in headless/offscreen CI). `QWidget.isHidden()` only checks the widget's own explicit hidden flag — the correct choice for testing widget show/hide state without showing the top-level window.
+
+- **`test_gui_graph_editor.py`** — ✅ C-1 (`67f154e`): **19 tests** covering `FrameEdgeTree`, `AddFrameDialog`, `AddEdgeDialog`, `HTMEntryWidget`, and `MainWindow` (4 basic smoke tests). Key tests: tree refreshes on project change; root/junction coloring; duplicate frame name rejected; duplicate edge name rejected; parent==child rejected; invalid matrix entry keeps OK disabled; format selector switches stack page; selected_item_info returns correct (name, kind) tuple; save/load round-trip via MainWindow.
+
+- **`test_gui_tolerance_editor.py`** — ✅ C-2 (`33423f9`): **13 tests** covering `ToleranceEditorWidget`. Key tests: placeholder shown with no edges; first edge auto-selected on set_project; field changes write through to `project.edges[0].tolerance`; sigma spinbox disabled for uniform, enabled for normal; locked checkbox writes through; project_changed emitted on field change; set_selected_edge syncs combo; bulk-apply-to-edge changes all 6 DoF; bulk-apply-to-all-edges changes all edges; set_project clears selection.
+
+- **`test_gui_run_panel.py`** — ✅ C-3 (`d0457bd`): **11 tests** covering `RunPanelWidget`. Key tests: no-edges run shows error status; mode switches to IK shows IK group; IK group hidden in FK mode; frame combos populated on set_project; frame combos refreshed on refresh_view; n_trials and seed write through to sim_settings; sim_settings loaded on set_project; run_completed signal emitted on successful FK run (direct worker call, not background thread); run_failed signal emitted on engine error.
+
+- **`test_gui_results_viewer.py`** — ✅ C-4 (`63cd2ea`): **11 tests** covering `ResultsViewerWidget`. Key tests: starts on page 0 (placeholder); FK result switches to page 1; IK result switches to page 2; FK frame combo populated with frame names; `_view_report_btn` enabled after FK result (replaces earlier embedded-canvas test that was removed when standalone windows were adopted); envelope table has 6 rows after FK result; IK alloc table row count matches edge count; IK achieved table has 6 rows; clear() resets to page 0; FK then clear leaves view_report_btn disabled; pareto combos populated.
+
+- **`test_gui_point_pair_panel.py`** — ✅ C-5 (`63cd2ea`): **11 tests** covering `PointPairPanelWidget`. Key tests (all use `isHidden()`/`not isHidden()` for visibility, not `isVisible()`): placeholder shown with no result; combos populated from project; connected frames show no warning; disjoint frames show warning; name auto-populated as `"A → B"`; save adds to `project.saved_analyses`; save emits `project_changed`; duplicate name rejected with error label; selecting saved row loads combos (with `blockSignals` preventing re-trigger); delete removes from project and emits `project_changed`; FK result shows envelope table (6 rows, correct DoF labels).
+
+- **`test_gui_main_window.py`** — ✅ C-6 (`f1ffa2c`): **7 cross-panel integration tests** covering `MainWindow` signal routing. Tests call internal handlers directly without starting the background worker. Key tests: FK result → `results_viewer._stack.currentIndex() == 1`; FK result → `point_pair_panel._trial_data is not None`; graph change → `run_panel._frame_a_combo.count()` updated; graph change → `point_pair_panel._frame_a_combo.count()` updated; `_new_project()` → results_viewer back to page 0; `_new_project()` → point_pair_panel._trial_data is None; `_on_run_failed()` → results_viewer stays on page 0.
+
 **Granular Task List (cross-cutting, beyond what's already specified per-module above):**
 1. ✅ **Done (A6, `83b8ee3`)** Set up `pytest` configuration with a shared `conftest.py` providing reusable fixtures: `two_edge_chain` (root→B→C, 5 mm + 10 mm translation nominals), `three_edge_chain` (Rz=π/4 + 50 mm + zero-tol), `shared_frame_graph` (shared-base multi-branch). No `pytest.ini` was needed — auto-discovery works from the project root. Module-level helpers `make_tol` / `make_zero_tol` / `make_htm` duplicated inline in `test_integration.py` rather than imported from conftest (conftest.py is not directly importable as a Python module in pytest's default discovery mode without additional path config).
 2. ✅ **Done (A6, `83b8ee3`)** `DEFAULT_ATOL = 1e-9` and `SMALL_ANGLE_ATOL = 1e-6` defined in `conftest.py` and mirrored in `test_integration.py`. Convention: `DEFAULT_ATOL` for near-exact floating-point composition (no trig residual); `SMALL_ANGLE_ATOL` for checks where `sin(δθ) vs δθ` at ~1 mrad introduces ~1.7e-10 second-order residual.
 3. ✅ **Done (A6, `83b8ee3`)** `test_shared_edge_sampling_consistency` implemented as a module-level function in `tests/test_integration.py` (not inside any class), findable by `pytest -k test_shared_edge_sampling_consistency`. Complementary class-based coverage exists in `test_monte_carlo_fk.py::TestSharedEdgeConsistency`, but the required standalone named function is in `test_integration.py` per this spec requirement.
-4. ✅ **Done (A6, `83b8ee3` — placeholder)** `test_allocation_mc_validation_discrepancy` in `tests/test_allocation.py` as a `@pytest.mark.skip(reason="sim/allocation.py not yet implemented — Milestone B-2 task")` module-level function. Real implementation pending B-2.
+4. ✅ **Done (A6, `83b8ee3` — placeholder; B2-3 `0c9bd9d` — real implementation)** `test_allocation_mc_validation_discrepancy` in `tests/test_allocation.py`.
 5. ✅ **Done (A6, `83b8ee3`)** `README.md` "Running Tests" section: `source .venv/bin/activate && python -m pytest tests/ -q`. Notes that all tests must pass before GUI work begins (Section 10 rule).
+6. ✅ **Done (C-1 through C-6, commits `67f154e` → `f1ffa2c`)** Six GUI test files (`test_gui_graph_editor.py`, `test_gui_tolerance_editor.py`, `test_gui_run_panel.py`, `test_gui_results_viewer.py`, `test_gui_point_pair_panel.py`, `test_gui_main_window.py`) totaling **72 tests** (19 + 13 + 11 + 11 + 11 + 7). All run headlessly with `QT_QPA_PLATFORM=offscreen`. **`isHidden()` convention (not `isVisible()`) used for all widget visibility assertions** — documented as a project-wide rule for all future GUI test additions.
 
 **Interfaces:**
 
@@ -1202,15 +1379,17 @@ The root-level `conftest.py` (stdlib `io` name-collision workaround) was deleted
 
 **Target: ~55–77 hours.**
 
-| # | Task | Module(s) | Est. Hours |
-|---|---|---|---|
-| C1 | GUI: graph/chain editor (add/edit Frames & Edges, multi-format HTM entry) | `gui/graph_editor/` | 10–14 |
-| C2 | GUI: tolerance editor (per-DoF distribution, bound, sigma-level, lock toggle) | `gui/tolerance_editor/` | 6–8 |
-| C3 | GUI: run panel (mode select, N trials, seed, distribution, run trigger; IK mode calls `allocate()` by default) | `gui/run_panel/` | 4–6 |
-| C4 | GUI: results viewer (envelope tables, histograms, 2D projections of bounding shapes, Pareto sensitivity chart, via Matplotlib) | `gui/results_viewer/` | 10–14 |
-| C5 | GUI: point-pair analysis panel + saved-analysis persistence in project file | `gui/point_pair_panel/` | 5–8 |
-| C6 | Additional/expanded test coverage at the GUI integration level | `tests/` | 8–12 |
-| C7 | Integration, bug fixing, end-to-end polish pass | — | 12–15 |
+| # | Status | Task | Module(s) | Est. Hours | Commit |
+|---|---|---|---|---|---|
+| C1 | ✅ Done | GUI: graph/chain editor (`FrameEdgeTree`, `AddFrameDialog`, `AddEdgeDialog`, `HTMEntryWidget` with 4 formats + live validation; root/junction visual coding; `GraphEditorWidget` shell) | `gui/graph_editor/` | 10–14 | `67f154e` |
+| C2 | ✅ Done | GUI: tolerance editor (per-DoF distribution/bound/sigma-level/locked grid; σ-level spinbox conditional enable; bulk-apply-to-edge and bulk-apply-to-all; auto-select first edge; `set_selected_edge` cross-panel wiring) | `gui/tolerance_editor/` | 6–8 | `33423f9` |
+| C3 | ✅ Done | GUI: run panel (FK/IK mode selector; N trials/seed/randomize; IK target frame pair + 6 DoF target bound entry; `_RunWorker(QThread)` background execution; sim_settings write-back; status label + indeterminate progress bar) | `gui/run_panel/` | 4–6 | `d0457bd` |
+| C4 | ✅ Done | GUI: results viewer (3-page `QStackedWidget`; FK page with frame combo + envelope table + "Open Frame Report" button + Pareto group; IK page with convergence label + allocation table + achieved envelope; Matplotlib figures in `_FigureWindow` standalone windows to avoid dock-height sizing conflicts) | `gui/results_viewer/` | 10–14 | `63cd2ea` |
+| C5 | ✅ Done | GUI: point-pair analysis panel (Frame A/B combos; connectivity check via `networkx.Graph` on schema objects; name auto-populate; save/delete `SavedAnalysisModel`; relative-pose envelope table from `point_pair_envelope_box()`; Section 5.3 compliant — no `FrameGraph` at selection time) | `gui/point_pair_panel/` | 5–8 | `63cd2ea` |
+| C6 | ✅ Done | Cross-panel integration tests: 7 tests in `test_gui_main_window.py` verifying FK result → results_viewer page, FK result → point_pair_panel trial data, graph change → run_panel / point_pair_panel combo refresh, new_project → viewer reset, run_failure → viewer unchanged | `tests/` | 8–12 | `f1ffa2c` |
+| C7 | ✅ Done | Window/dock state persistence (`QSettings` save/restore geometry + dock state); Recent Files menu (capped at 5, dedup, missing-file graceful removal, "Clear Recent" action); `closeEvent` save-before-close dialog; title-bar dirty asterisk | `gui/main_window.py` | 12–15 | `f1ffa2c` |
+
+**✅ Milestone C COMPLETE — all 7 tasks done and pushed to `origin/main`. Suite: 302 passed, 0 skipped.**
 
 **Milestone C exit criteria:** A double-clickable (or `python main.py`-launchable) desktop application where a user with no Python experience could define a system, set tolerances, run both modes, and extract bounding-shape and sensitivity decisions — backed by the same validated engine from Milestones A, B-1, and B-2.
 
@@ -1327,4 +1506,10 @@ Because this tool produces engineering decisions about physical hardware toleran
 | 2026-06-26 | Claude (B2-2 implementation) | **Implemented `AllocationEngine.allocate()`, `AllocationEngine.validate()`, `AllocationResult`, `ValidationReport`, `_copy_frame_graph_with_tolerances()`, and `_damp_angular()` in `sim/allocation.py`** (commit `b005eaf`). Key implementation details: (1) `_copy_frame_graph_with_tolerances(fg, new_tolerances)` builds a fresh `FrameGraph` with the same frames and edges but swaps in proposed tolerances for any edge whose name appears in `new_tolerances`; used by `validate()` so the original graph is never mutated. (2) `_damp_angular(allocation, gamma)` scales ONLY angular DoF (indices 3,4,5 = rx,ry,rz) by `gamma` per call — translation bounds (dx,dy,dz) are intentionally left unchanged because the failure mode being corrected is angular-to-positional lever-arm coupling, not translational error. Locked DoF are not damped. (3) `validate()` runs `MonteCarloFKEngine.run()` on a copied graph, then calls `point_pair_envelope_box()` for the relative pose between the two measurement frames; per-DoF pass/fail determined by `max(|achieved["min"]|, |achieved["max"]|) ≤ target_bound`. (4) `allocate()` runs `solve()` first, validates the baseline, and immediately returns with `iterations_used=0` if it passes. If it fails, a `deepcopy` of the baseline is damped iteratively up to `max_iter=10` times; the baseline dict is never modified so `AllocationResult.baseline_linear_allocation` always reflects the original linear solution. Non-convergence returns `converged=False` with status message exactly `"Allocation could not converge to target budget"`. Locked constants: `gamma=0.9`, `max_iter=10`, `n_validate=1000`, `seed=42`. Suite: 223 passed, 1 skipped (B2-3 placeholder still present). |
 | 2026-06-27 | Project Owner (request), Claude (implementation) | **Renamed `io/` package to `persistence/`** (commit TBD). Motivation: `io` is a Python frozen stdlib module; `FrozenImporter` in `sys.meta_path` sits ahead of `PathFinder`, so `from io.schema import X` always resolved to the stdlib, not our package. The previous fix was a root-level `conftest.py` (39 lines) using `importlib.util.spec_from_file_location` to pre-load our modules into `sys.modules` before pytest collection. The rename eliminates the collision entirely. Changes: (1) `io/` directory renamed to `persistence/`; (2) one intra-package import updated in `persistence/serializer.py` (`from io.schema` → `from persistence.schema`); (3) all `from io.schema`/`from io.serializer` imports updated in `tests/test_schema.py` and `tests/test_serializer.py`; (4) root `conftest.py` deleted; (5) `docs/design_spec.md` and `CLAUDE.md` updated throughout. Suite remains **230 passed, 0 skipped** — no test count change. |
 | 2026-06-26 | Claude (B2-3 implementation) | **Implemented 7 real tests in `tests/test_allocation.py`** (commit `0c9bd9d`), replacing the `@pytest.mark.skip` placeholder. **Test geometry for lever-arm tests (4, 5, 6, 7):** three-frame chain `base→pivot` (identity nominal, rz FREE, all other DoF locked with bound=0) → `pivot→arm` (Tx(1 m) locked, bound=0) → `arm→exit` (Ry(π/2) locked, bound=0). This geometry was chosen because: the linear Jacobian block for `pivot_edge` is `Ad_{T_{base→pivot,nom}} = Ad_I = I₆`, giving column 5 (rz input) as `[0,0,0,0,0,1]` — zero dy coupling at first order. The MC, however, composes the perturbed pivot rotation through the locked Tx(L) arm: `dy = L·sin(δrz) ≈ L·δrz` (first-order, missed entirely by the Jacobian). With L=1 m and target B_rz=0.10, EqualAllocation assigns rz-bound=0.10; MC produces dy_mc≈0.10 > B_dy=0.05. Damping converges after k=7 iterations (0.9⁷·0.10≈0.0478 ≤ 0.05). For the non-convergence test, B_dy=0.001 requires k≥44 iterations, far beyond max_iter=10. The downstream Ry(π/2) on `arm→exit` also swings the rz perturbation into an rx output error (confirmed: `rx ≈ δrz` via conjugation `Ry(-π/2)·Rz(δrz)·Ry(π/2) ≈ Rx(δrz)`), verifying correct behaviour with non-trivial downstream nominal rotations. **Tests:** (1) `test_equal_allocation_sanity` — 3-edge identity chain, all free, all edges get same bound per DoF. (2) `test_locked_edge_excluded` — locked middle edge absent from result dict. (3) `test_all_edges_locked_raises` — ValueError with "No free edges" message. (4) `test_allocation_mc_validation_discrepancy` — lever-arm chain, `solve()`→`validate()` returns `passed=False`, `per_dof_pass["dy"]=False`. (5) `test_damping_loop_convergence` — `allocate()` returns `converged=True`, `iterations_used≥1`, corrected angular bounds < baseline angular bounds. (6) `test_damping_loop_nonconvergence` — `converged=False`, `status_message=="Allocation could not converge to target budget"`, `iterations_used==10`. (7) `test_allocation_result_preserves_both_allocations` — baseline and corrected are distinct objects, baseline angular bounds > corrected. **Milestone B-2 fully complete.** Suite: **230 passed, 0 skipped.** |
+| 2026-06-28 | Claude (C-1 implementation) | **Implemented `gui/graph_editor/`** (commit `67f154e`). Five source files: `__init__.py`, `graph_editor_widget.py`, `frame_edge_tree.py`, `add_frame_dialog.py`, `add_edge_dialog.py`, `htm_entry_widget.py`. **Key decisions:** (1) `FrameEdgeTree` uses `QTreeWidget` with two fixed top-level items ("Frames", "Edges"); items store `name` in `Qt.ItemDataRole.UserRole` and the root/section items store no data — `selected_item_info()` returns `None` for them. Root frames rendered bold blue (`[ROOT] name`); junction frames (2+ incoming edges) orange (`[JUNCTION] name`). (2) `HTMEntryWidget` uses a `QComboBox` format selector + `QStackedWidget` (4 pages: XYZ+Euler, 4×4 Matrix, Quaternion+XYZ, Screw). Every `valueChanged` signal calls `_validate()` which calls the appropriate `HTM.from_*()` constructor and catches the resulting `ValueError`; sets `_valid` and emits `validation_changed(bool)` only when validity flips. The matrix page's bottom row spinboxes are disabled (always `[0,0,0,1]`). (3) `AddEdgeDialog` gates OK on `_validate_fields()` returning `""` (no error). Edge names validated for uniqueness across `project.edges`. Parent == Child validation runs same-frame check. (4) New edges created via `_default_tolerance()` — all 6 DoF set to `uniform, bound=0, locked=True` so they simulate safely from day 1 without contributing error. (5) All content in `QScrollArea(widgetResizable=True, frameShape=NoFrame)`. **Section 5.3 compliance:** `GraphEditorWidget` mutates `self._project` (a `ProjectModel`) directly; never constructs a `FrameGraph`. 19 tests in `tests/test_gui_graph_editor.py`. Suite: **249 passed, 0 skipped.** |
+| 2026-06-28 | Claude (C-2 implementation) | **Implemented `gui/tolerance_editor/tolerance_editor_widget.py`** (commit `33423f9`). **Key decisions:** (1) `_DofRow` is a helper class, not a `QWidget` — widgets are added directly to the parent `QGridLayout`, avoiding an extra layout nesting level. Fields: distribution `QComboBox`, bound `QDoubleSpinBox`, σ-level `QDoubleSpinBox` (disabled/grayed when `uniform`), locked `QCheckBox`, error `QLabel`. (2) Edge selector uses `.activated` (not `.currentIndexChanged`) so re-clicking the same edge re-loads it — important if the project was mutated externally. (3) Load guard: `self._loading = True` during `_load_selected_edge()` prevents `_on_field_changed()` from emitting `project_changed` during widget population. (4) `_on_field_changed()` calls `_DofRow.is_valid()` on each row (which constructs a `ToleranceSpec` to validate) and only writes back rows that pass; per-row error labels show inline. (5) Bulk apply preserves existing `locked` flags — distribution, bound, and sigma change but locked state is user-controlled. (6) Auto-selects the first edge in `_refresh_edge_combo()` so the DoF panel appears immediately on `set_project()`. 13 tests in `tests/test_gui_tolerance_editor.py`. Suite: **262 passed, 0 skipped.** |
+| 2026-06-28 | Claude (C-3 implementation) | **Implemented `gui/run_panel/run_panel_widget.py`** (commit `d0457bd`). **Key decisions:** (1) `_RunWorker(QThread)` owns `run()`: dispatches to `MonteCarloFKEngine.run()` (FK) or `AllocationEngine.allocate()` (IK with `n_validate=1000, seed=seed`). Emits `finished(object)` or `failed(str)`. `run()` never touches the `ProjectModel` — it receives a `FrameGraph` already constructed by the main thread immediately before `.start()`. (2) `project_model_to_frame_graph()` is called in `_on_run_clicked()` on the main thread, immediately before the worker is started. If conversion fails (e.g., cycle in graph), an error status is shown and the run is aborted before a worker is ever launched. (3) Worker is connected to its own `deleteLater()` on both `finished` and `failed` to prevent dangling worker references in tests. (4) IK target bounds default to `0.001` per DoF with step `0.0001`. (5) SimSettings written back on every field change so mode/n_trials/seed persist in the project file. (6) All content in `QScrollArea(widgetResizable=True, frameShape=NoFrame)`. **This is the canonical single location where Section 5.3's `persistence.schema` → `core/sim` conversion happens in the GUI.** 11 tests in `tests/test_gui_run_panel.py`. Suite: **273 passed, 0 skipped.** |
+| 2026-06-28 | Claude (C-4 implementation, including plot visibility fix) | **Implemented `gui/results_viewer/results_viewer_widget.py`** (commit `63cd2ea`, along with C-5). **Key decisions:** (1) **Standalone `_FigureWindow` instead of embedded canvas** (critical fix to original plan): the original spec (Section 6.17) called for embedding `FigureCanvasQTAgg` directly in the dock widget. This was implemented and found to produce invisible/inaccessible plots at typical dock heights — Matplotlib's canvas minimum size constraints prevent it from rendering within a dock that is shorter than the canvas minimum. Fix: `_FigureWindow(QWidget)` with `Qt.WindowType.Window` flag opens as a separate OS window sized 1200×900. `closeEvent` calls `plt.close(self._fig)`. References held in `self._open_windows: list[_FigureWindow]` to prevent garbage collection. (2) `_scrollable(inner)` module-level helper wraps inner pages in `QScrollArea(widgetResizable=True, frameShape=NoFrame)` — standard dock-size-independence pattern. (3) IK alloc table tooltips: when a corrected bound differs from the baseline by `> 1e-9`, a tooltip on the cell shows `"baseline: {b_spec.bound:.6f}"` — visually communicates damping-loop correction. (4) Locked DoF rendered as `"—"` in gray; non-locked rendered as 6-decimal float. (5) "Open Frame Report in New Window" button disabled at construction; enabled in `_update_fk_display()` when a frame's data is loaded; disabled again in `clear()`. 11 tests in `tests/test_gui_results_viewer.py`. |
+| 2026-06-28 | Claude (C-5 implementation) | **Implemented `gui/point_pair_panel/point_pair_panel_widget.py`** and `gui/point_pair_panel/__init__.py` (commit `63cd2ea`, same as C-4). **Key decisions:** (1) **Section 5.3 compliance for connectivity check**: `_are_connected(project, frame_a, frame_b)` builds a `networkx.Graph` from `project.frames`/`project.edges` (Pydantic `FrameModel`/`HTMEdgeModel` instances) directly — never calls `project_model_to_frame_graph()`. Core objects are only constructed in `_update_envelope()`, which runs at display time (after a run), not at selection time. (2) `_repopulate_frame_combos()` uses `blockSignals(True)` on both combos during refill and defaults `_frame_b_combo` to index 1 (not 0) to avoid A==B default. (3) `_on_saved_row_changed(row)` also uses `blockSignals(True)` during combo updates to prevent re-triggering `_on_selection_changed()` during a programmatic load. (4) `_on_selection_changed()` auto-populates name as `f"{frame_a} → {frame_b}"` only when both frames are different AND connected — avoids overwriting a user-typed name when they're tweaking an already-saved analysis. (5) `clear()` only resets `_trial_data`; preserves project and combo state — avoids flicker when New is invoked (the graph/frames would also be reset via `set_project()` called separately). (6) `_fill_envelope_table()` renders values to 6 decimal places; all cells are read-only (`Qt.ItemFlag.ItemIsEnabled` only). **`isHidden()` headless-Qt invariant** first documented in this module's tests — all future GUI tests must use `isHidden()` not `isVisible()` for visibility assertions in offscreen mode (see Section 6.20). 11 tests in `tests/test_gui_point_pair_panel.py`. Suite after C-4 and C-5 combined commit: **295 passed, 0 skipped.** |
+| 2026-06-28 | Claude (C-6 + C-7 implementation) | **Implemented 7 cross-panel integration tests in `tests/test_gui_main_window.py` (C-6)** and **`QSettings` window/dock persistence + Recent Files menu in `gui/main_window.py` (C-7)** (commit `f1ffa2c`). **C-6 key decisions:** (1) All 7 tests call `MainWindow` internal handlers directly (`_on_run_completed`, `_on_graph_editor_changed`, `_new_project`, `_on_run_failed`) — no background threads, no `qtbot.waitSignal`. (2) `_make_trial_data(project)` helper calls `project_model_to_frame_graph()` + `MonteCarloFKEngine.run()` on the main thread — acceptable in tests since it runs in <0.5 s for 50 trials. (3) Tests import `_empty_project` (module-level helper) for clean new-project state. **C-7 key decisions:** (1) `QSettings("TolTransform", "TolTransform")` — both args are the same string (org name and app name); the platform store location is OS-dependent (macOS: `~/Library/Preferences/com.TolTransform.TolTransform.plist`; Linux: `~/.config/TolTransform/TolTransform.conf`; Windows: Registry). (2) `_restore_settings()` called at end of `__init__()` after `_setup_ui()` — dock object names must already be registered (via `setObjectName()` in `_setup_docks()`) before `restoreState()` is called, otherwise the dock positions are ignored. (3) `_save_settings()` called from `closeEvent()` before `event.accept()` — dock state saved at close, not on every layout change. (4) Recent Files: `_add_recent(path)` uses list comprehension `[path] + [p for p in self._recent_files if p != path]` — prepend + dedup in one line, then cap with slice `[:_MAX_RECENT]`. `_open_recent(path)` checks `os.path.exists()` first; on miss, shows `QMessageBox.critical` and calls `_remove_recent()` before returning. (5) "Clear Recent" is a separator + action at the bottom of the recent menu, so it is never shown when the list is empty (the menu shows only the disabled "(No recent files)" entry in that case). **Milestone C complete.** Suite: **302 passed, 0 skipped.** |
 
