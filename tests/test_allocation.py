@@ -8,7 +8,7 @@ import pytest
 from core.frame_graph import FrameGraph
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from core.transforms import HTM
-from sim.allocation import AllocationEngine
+from sim.allocation import AllocationEngine, RSSAllocation, SplitAllocation
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -230,3 +230,64 @@ def test_allocation_result_preserves_both_allocations():
                     f"{edge_name} DoF {j}: baseline ({b_tol[j].bound:.6f}) "
                     f"must exceed corrected ({c_tol[j].bound:.6f})"
                 )
+
+
+def make_lever_arm_chain_all_free(L=2.0):
+    """Two-frame chain with one free edge (all 6 DoF free) and a lever arm of length L.
+
+    L=2.0 makes the lever-arm coupling (L * s_ang contribution to dx/dy output) the
+    binding constraint in SplitAllocation step 1, causing s_ang < s_trans.
+    """
+    fg = FrameGraph()
+    fg.add_frame("base")
+    fg.add_frame("tip")
+    # Lever arm along Z: t = [0, 0, L] creates rx→dy and ry→dx coupling via skew(t)
+    nom = HTM.from_xyz_euler([0.0, 0.0, L], [0.0, 0.0, 0.0])
+    fg.add_edge("base", "tip", nom, _free_tol6(1.0), name="link")
+    return fg, "base", "tip"
+
+
+def test_split_trans_bound_looser_than_ang():
+    """SplitAllocation must give translational DoF a strictly looser bound than angular.
+
+    Chain: single edge with 2m lever arm along Z.
+    - The lever arm (L=2m) couples rx→dy and ry→dx with coefficient 2 m/rad.
+    - SplitAllocation step 1 sets s_ang ≈ B/L (tight — lever arm driven).
+    - Step 2 residual for dz (no angular coupling) gives s_trans = B (loose).
+    - Result: s_trans > s_ang.
+    """
+    fg, fa, fb = make_lever_arm_chain_all_free(L=2.0)
+    target = ToleranceSpec6(*[_spec(0.05) for _ in range(6)])
+
+    alloc = AllocationEngine.solve(fg, fa, fb, target, objective=SplitAllocation(mode="rss"))
+    link = alloc["link"]
+
+    s_trans = link[2].bound   # dz — no lever-arm coupling in this geometry
+    s_ang   = link[3].bound   # rx — coupled via 2m lever arm
+
+    assert s_trans > s_ang, (
+        f"Split: translational dz bound {s_trans:.6f} should exceed "
+        f"angular rx bound {s_ang:.6f} for 2m lever arm"
+    )
+
+
+def test_split_trans_looser_than_rss():
+    """SplitAllocation uncoupled translational bound must exceed RSSAllocation's uniform bound.
+
+    RSSAllocation gives one s for all DoF, driven by the lever-arm rows.
+    SplitAllocation lets uncoupled translational DoF (dz, not coupled to angular via this
+    lever arm geometry) recover their full budget, giving s_trans_dz > s_rss.
+    """
+    fg, fa, fb = make_lever_arm_chain_all_free(L=2.0)
+    target = ToleranceSpec6(*[_spec(0.05) for _ in range(6)])
+
+    rss_alloc   = AllocationEngine.solve(fg, fa, fb, target, objective=RSSAllocation())
+    split_alloc = AllocationEngine.solve(fg, fa, fb, target, objective=SplitAllocation(mode="rss"))
+
+    rss_s       = rss_alloc["link"][2].bound    # RSS uniform bound (dz)
+    split_trans = split_alloc["link"][2].bound  # Split translational dz bound
+
+    assert split_trans > rss_s, (
+        f"SplitAllocation dz bound {split_trans:.6f} should exceed "
+        f"RSSAllocation uniform bound {rss_s:.6f}"
+    )

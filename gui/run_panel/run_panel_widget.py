@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from persistence.schema import ProjectModel, project_model_to_frame_graph
-from sim.allocation import AllocationEngine, AllocationResult, EqualAllocation, RSSAllocation
+from sim.allocation import AllocationEngine, AllocationResult, EqualAllocation, RSSAllocation, SplitAllocation
 from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData
 
 _DOF_NAMES = ("dx", "dy", "dz", "rx", "ry", "rz")
@@ -213,6 +213,7 @@ class RunPanelWidget(QWidget):
         method_row = QHBoxLayout()
         method_row.addWidget(QLabel("Method:"))
         self._method_combo = QComboBox()
+        self._method_combo.addItem("Split (RSS)  ← recommended", "split_rss")
         self._method_combo.addItem("Statistical (RSS)", "rss")
         self._method_combo.addItem("Worst-Case (Linear Sum)", "wc")
         method_row.addWidget(self._method_combo, stretch=1)
@@ -335,7 +336,13 @@ class RunPanelWidget(QWidget):
                 self._set_status("Error: Frame A and Frame B must be different", error=True)
                 return
             target_tol = self._get_target_tol()
-            objective = RSSAllocation() if self._method_combo.currentData() == "rss" else EqualAllocation()
+            _method = self._method_combo.currentData()
+            if _method == "split_rss":
+                objective = SplitAllocation(mode="rss")
+            elif _method == "rss":
+                objective = RSSAllocation()
+            else:
+                objective = EqualAllocation()
         else:
             frame_a = frame_b = ""
             target_tol = None

@@ -170,6 +170,121 @@ class RSSAllocation(AllocationObjective):
         return _build_result(free_edges, s)
 
 
+def _build_type_masks(
+    free_edges: list, N: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (trans_mask, ang_mask) — free translational / angular columns."""
+    trans = np.zeros(6 * N, dtype=bool)
+    ang = np.zeros(6 * N, dtype=bool)
+    for i, edge in enumerate(free_edges):
+        for j in range(6):
+            if not edge.tolerance[j].locked:
+                if j < 3:
+                    trans[6 * i + j] = True
+                else:
+                    ang[6 * i + j] = True
+    return trans, ang
+
+
+def _build_split_result(
+    free_edges: list, s_trans: float, s_ang: float
+) -> dict[str, ToleranceSpec6]:
+    """Assign s_trans to free translational DoF, s_ang to free angular DoF."""
+    result: dict[str, ToleranceSpec6] = {}
+    for edge in free_edges:
+        specs = []
+        for j in range(6):
+            existing = edge.tolerance[j]
+            if existing.locked:
+                specs.append(copy.copy(existing))
+            else:
+                s = s_trans if j < 3 else s_ang
+                specs.append(ToleranceSpec(distribution="uniform", bound=s))
+        result[edge.name] = ToleranceSpec6(*specs)
+    return result
+
+
+class SplitAllocation(AllocationObjective):
+    """Two-step allocation that assigns separate bounds to translational and angular DoF.
+
+    Problem with equal allocation: a large lever arm forces angular DoF tight
+    (bound ≈ target/L), and that same tight bound is applied to translational DoF
+    even though they have no lever-arm amplification.
+
+    Fix — two steps:
+
+    Step 1 — s_ang from ALL output rows, angular input columns only:
+        For each k: s_k = B_k / sqrt(Σ_{ang_free_cols} J[k,col]²)  (RSS)
+                 or s_k = B_k / Σ_{ang_free_cols} |J[k,col]|       (worst-case)
+        s_ang = min(s_k) over rows where ang denom > 0.
+        This captures both direct angular output coupling AND lever-arm coupling.
+
+    Step 2 — s_trans from translational output rows, after subtracting s_ang's
+    contribution from the budget:
+        For each k in {0,1,2}:
+          residual² = B_k² - Σ_{ang_free_cols} J[k,col]² · s_ang²  (RSS)
+          s_trans_k = sqrt(residual²) / sqrt(Σ_{trans_free_cols} J[k,col]²)
+        s_trans = min(s_trans_k) over rows with positive residual.
+        Falls back to s_ang when no residual remains (lever arm fully consumes budget).
+
+    Constructor parameter mode: "rss" (default) or "worst_case".
+    """
+
+    def __init__(self, mode: str = "rss") -> None:
+        if mode not in ("rss", "worst_case"):
+            raise ValueError(f"mode must be 'rss' or 'worst_case', got {mode!r}")
+        self._mode = mode
+
+    def solve(
+        self,
+        sensitivity_matrix: np.ndarray,
+        target_tolerance: ToleranceSpec6,
+        free_edges: list,
+    ) -> dict[str, ToleranceSpec6]:
+        J = sensitivity_matrix
+        N = len(free_edges)
+        trans_mask, ang_mask = _build_type_masks(free_edges, N)
+
+        # ── Step 1: s_ang ─────────────────────────────────────────────────────
+        s_ang_values: list[float] = []
+        for k in range(6):
+            if self._mode == "rss":
+                denom = float(np.sqrt(np.sum(J[k, ang_mask] ** 2)))
+            else:
+                denom = float(np.sum(np.abs(J[k, ang_mask])))
+            if denom > 0.0:
+                s_ang_values.append(target_tolerance[k].bound / denom)
+
+        s_ang = (
+            min(s_ang_values) if s_ang_values
+            else float(min(target_tolerance[k].bound for k in range(6)))
+        )
+
+        # ── Step 2: s_trans from residual translational budget ────────────────
+        s_trans_values: list[float] = []
+        for k in range(3):  # translational output rows only
+            if self._mode == "rss":
+                ang_used = float(np.sum(J[k, ang_mask] ** 2)) * s_ang ** 2
+                residual_sq = target_tolerance[k].bound ** 2 - ang_used
+                if residual_sq <= 0.0:
+                    continue
+                trans_denom = float(np.sqrt(np.sum(J[k, trans_mask] ** 2)))
+                if trans_denom > 0.0:
+                    s_trans_values.append(float(np.sqrt(residual_sq)) / trans_denom)
+            else:
+                ang_used = float(np.sum(np.abs(J[k, ang_mask]))) * s_ang
+                residual = target_tolerance[k].bound - ang_used
+                if residual <= 0.0:
+                    continue
+                trans_denom = float(np.sum(np.abs(J[k, trans_mask])))
+                if trans_denom > 0.0:
+                    s_trans_values.append(residual / trans_denom)
+
+        s_trans = min(s_trans_values) if s_trans_values else s_ang
+
+        return _build_split_result(free_edges, s_trans, s_ang)
+
+
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 def _copy_frame_graph_with_tolerances(
