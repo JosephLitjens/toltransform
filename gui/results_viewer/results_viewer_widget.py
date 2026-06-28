@@ -280,7 +280,6 @@ class ResultsViewerWidget(QWidget):
 
     def _show_ik(self, result: AllocationResult) -> None:
         method_label = {
-            "SplitAllocation": "Split (RSS)",
             "RSSAllocation": "Statistical (RSS)",
             "EqualAllocation": "Worst-Case",
         }.get(result.method, result.method)

@@ -22,4 +22,6 @@ python -m pytest tests/ -q
 All tests must pass before beginning GUI work (Section 10 of the design spec). Run this at the start of every session to confirm nothing has silently broken.
 
 ## Status
-Milestone A (V0.5) in progress — A1–A6 complete, A7 (examples/CLI) next.
+Milestones A–D complete. 311 tests passing.
+
+**IK Allocation features:** Statistical (RSS) and Worst-Case allocation methods; user-configurable max iterations; Target ± column in results; binary-search angular refinement for maximum possible bounds.
