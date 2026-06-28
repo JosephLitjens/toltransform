@@ -43,7 +43,8 @@ from PySide6.QtWidgets import (
 from persistence.schema import ProjectModel, project_model_to_frame_graph
 from postprocess.reporting import generate_frame_report, generate_sensitivity_report
 from postprocess.stats import DOF_LABELS, compute_tolerance_sensitivities, frame_envelope_box
-from sim.allocation import AllocationResult
+from core.tolerance import ToleranceSpec6
+from sim.allocation import AllocationResult, ValidationReport
 from sim.monte_carlo_fk import TrialData
 
 
@@ -209,19 +210,11 @@ class ResultsViewerWidget(QWidget):
         alloc_layout.addWidget(self._alloc_table)
         layout.addWidget(alloc_group)
 
-        achieved_group = QGroupBox("Achieved Envelope vs. Target")
-        achieved_layout = QVBoxLayout(achieved_group)
-        self._achieved_table = QTableWidget(6, 5)
-        self._achieved_table.setHorizontalHeaderLabels(
-            ["DoF", "Target ±", "Min", "Max", "Pass?"]
-        )
-        self._achieved_table.verticalHeader().setVisible(False)
-        self._achieved_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
-        self._achieved_table.setMaximumHeight(210)
-        achieved_layout.addWidget(self._achieved_table)
-        layout.addWidget(achieved_group)
+        # Per-pair achieved envelope section — rebuilt dynamically in _show_ik().
+        self._per_pair_container = QWidget()
+        self._per_pair_layout = QVBoxLayout(self._per_pair_container)
+        self._per_pair_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._per_pair_container)
 
         layout.addStretch()
         return page
@@ -282,6 +275,7 @@ class ResultsViewerWidget(QWidget):
         method_label = {
             "RSSAllocation": "Statistical (RSS)",
             "EqualAllocation": "Worst-Case",
+            "LoosestAllocation": "Loosest (LP)",
         }.get(result.method, result.method)
 
         if result.converged:
@@ -299,6 +293,7 @@ class ResultsViewerWidget(QWidget):
             )
         self._ik_status_label.setText(status)
 
+        # ── Allocation table ──────────────────────────────────────────────────
         edges = list(result.corrected_allocation.keys())
         self._alloc_table.setRowCount(len(edges))
         for row, edge_name in enumerate(edges):
@@ -318,21 +313,66 @@ class ResultsViewerWidget(QWidget):
                             item.setToolTip(f"baseline: {b_spec.bound:.6f}")
                 self._alloc_table.setItem(row, col + 1, item)
 
-        vr = result.final_validation_report
-        target = result.target_tolerance
+        # ── Per-pair achieved envelopes ───────────────────────────────────────
+        self._clear_per_pair_widgets()
+
+        if result.per_pair_validation:
+            for frame_a, frame_b, vr in result.per_pair_validation:
+                # For multi-pair results the "target" is embedded in each pair's
+                # ValidationReport title; we have no per-pair target stored, so
+                # show min/max/pass without a target column.
+                title = f"Achieved Envelope: {frame_a} → {frame_b}"
+                passed_label = "✓ PASS" if vr.passed else "✗ FAIL"
+                color = "green" if vr.passed else "red"
+                group = QGroupBox(f"{title}   [{passed_label}]")
+                group.setStyleSheet(f"QGroupBox {{ color: {color}; }}")
+                g_layout = QVBoxLayout(group)
+                table = self._make_achieved_table(vr, target=None)
+                g_layout.addWidget(table)
+                self._per_pair_layout.addWidget(group)
+        else:
+            # Single-pair legacy path (direct allocate() call).
+            vr = result.final_validation_report
+            target = result.target_tolerance
+            group = QGroupBox("Achieved Envelope vs. Target")
+            g_layout = QVBoxLayout(group)
+            table = self._make_achieved_table(vr, target=target)
+            g_layout.addWidget(table)
+            self._per_pair_layout.addWidget(group)
+
+        self._stack.setCurrentIndex(2)
+
+    def _make_achieved_table(
+        self, vr: "ValidationReport", target: "ToleranceSpec6 | None"
+    ) -> QTableWidget:
+        has_target = target is not None
+        cols = ["DoF", "Target ±", "Min", "Max", "Pass?"] if has_target else ["DoF", "Min", "Max", "Pass?"]
+        table = QTableWidget(6, len(cols))
+        table.setHorizontalHeaderLabels(cols)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.setMaximumHeight(210)
+
         for row, (dof, i) in enumerate(zip(DOF_LABELS, range(6))):
             d = vr.achieved_envelope.get(dof, {})
             passed = vr.per_dof_pass.get(dof, False)
-            self._achieved_table.setItem(row, 0, _ro_item(dof))
-            target_str = f"±{target[i].bound:.6f}" if target is not None else "—"
-            self._achieved_table.setItem(row, 1, _ro_item(target_str))
-            self._achieved_table.setItem(row, 2, _ro_item(f"{d.get('min', 0.0):.6f}"))
-            self._achieved_table.setItem(row, 3, _ro_item(f"{d.get('max', 0.0):.6f}"))
+            col = 0
+            table.setItem(row, col, _ro_item(dof)); col += 1
+            if has_target:
+                table.setItem(row, col, _ro_item(f"±{target[i].bound:.6f}")); col += 1
+            table.setItem(row, col, _ro_item(f"{d.get('min', 0.0):.6f}")); col += 1
+            table.setItem(row, col, _ro_item(f"{d.get('max', 0.0):.6f}")); col += 1
             pass_item = _ro_item("✓" if passed else "✗")
             pass_item.setForeground(QColor("green") if passed else QColor("red"))
-            self._achieved_table.setItem(row, 4, pass_item)
+            table.setItem(row, col, pass_item)
 
-        self._stack.setCurrentIndex(2)
+        return table
+
+    def _clear_per_pair_widgets(self) -> None:
+        while self._per_pair_layout.count():
+            item = self._per_pair_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
     # ── Pareto ─────────────────────────────────────────────────────────────────
 
