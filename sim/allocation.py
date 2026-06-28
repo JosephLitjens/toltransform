@@ -187,19 +187,25 @@ def _build_type_masks(
 
 
 def _build_split_result(
-    free_edges: list, s_trans: float, s_ang: float
+    free_edges: list, trans_bounds: np.ndarray, s_ang: float
 ) -> dict[str, ToleranceSpec6]:
-    """Assign s_trans to free translational DoF, s_ang to free angular DoF."""
+    """Assign per-column trans_bounds to free translational DoF, s_ang to angular DoF.
+
+    trans_bounds is a (6*N,) array indexed by column position; only entries at
+    j < 3 (dx/dy/dz) are used; angular and locked entries are ignored.
+    """
     result: dict[str, ToleranceSpec6] = {}
-    for edge in free_edges:
+    for i, edge in enumerate(free_edges):
         specs = []
         for j in range(6):
             existing = edge.tolerance[j]
             if existing.locked:
                 specs.append(copy.copy(existing))
+            elif j < 3:
+                specs.append(ToleranceSpec(distribution="uniform",
+                                           bound=float(trans_bounds[6 * i + j])))
             else:
-                s = s_trans if j < 3 else s_ang
-                specs.append(ToleranceSpec(distribution="uniform", bound=s))
+                specs.append(ToleranceSpec(distribution="uniform", bound=s_ang))
         result[edge.name] = ToleranceSpec6(*specs)
     return result
 
@@ -260,29 +266,43 @@ class SplitAllocation(AllocationObjective):
             else float(min(target_tolerance[k].bound for k in range(6)))
         )
 
-        # ── Step 2: s_trans from residual translational budget ────────────────
-        s_trans_values: list[float] = []
-        for k in range(3):  # translational output rows only
-            if self._mode == "rss":
-                ang_used = float(np.sum(J[k, ang_mask] ** 2)) * s_ang ** 2
-                residual_sq = target_tolerance[k].bound ** 2 - ang_used
-                if residual_sq <= 0.0:
+        # ── Step 2: per-column translational bounds ───────────────────────────
+        # Each free translational column gets its own bound from the rows it
+        # appears in, after subtracting the angular contribution from the budget.
+        # This avoids a single s_trans from being simultaneously too loose for
+        # columns that are already saturated by lever-arm angular coupling.
+        trans_bounds = np.zeros(6 * N)
+        for i, edge in enumerate(free_edges):
+            for d in range(3):  # dx, dy, dz
+                if edge.tolerance[d].locked:
                     continue
-                trans_denom = float(np.sqrt(np.sum(J[k, trans_mask] ** 2)))
-                if trans_denom > 0.0:
-                    s_trans_values.append(float(np.sqrt(residual_sq)) / trans_denom)
-            else:
-                ang_used = float(np.sum(np.abs(J[k, ang_mask]))) * s_ang
-                residual = target_tolerance[k].bound - ang_used
-                if residual <= 0.0:
-                    continue
-                trans_denom = float(np.sum(np.abs(J[k, trans_mask])))
-                if trans_denom > 0.0:
-                    s_trans_values.append(residual / trans_denom)
+                col = 6 * i + d
+                s_col_values: list[float] = []
+                for k in range(6):  # all output rows
+                    jkc = float(J[k, col])
+                    if abs(jkc) < 1e-12:
+                        continue
+                    if self._mode == "rss":
+                        ang_used = float(np.sum(J[k, ang_mask] ** 2)) * s_ang ** 2
+                        residual_sq = target_tolerance[k].bound ** 2 - ang_used
+                        if residual_sq <= 0.0:
+                            s_col_values.append(0.0)
+                        else:
+                            s_col_values.append(float(np.sqrt(residual_sq)) / abs(jkc))
+                    else:
+                        ang_used = float(np.sum(np.abs(J[k, ang_mask]))) * s_ang
+                        residual = target_tolerance[k].bound - ang_used
+                        if residual <= 0.0:
+                            s_col_values.append(0.0)
+                        else:
+                            s_col_values.append(residual / abs(jkc))
+                # If no output row couples to this column, give it the full budget
+                trans_bounds[col] = (
+                    min(s_col_values) if s_col_values
+                    else float(min(target_tolerance[k].bound for k in range(3)))
+                )
 
-        s_trans = min(s_trans_values) if s_trans_values else s_ang
-
-        return _build_split_result(free_edges, s_trans, s_ang)
+        return _build_split_result(free_edges, trans_bounds, s_ang)
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
