@@ -216,6 +216,102 @@ def _damp_angular(
     return result
 
 
+def _scale_angular(
+    allocation: dict[str, ToleranceSpec6], factor: float
+) -> dict[str, ToleranceSpec6]:
+    """Return a copy of allocation with every free angular bound multiplied by factor."""
+    result: dict[str, ToleranceSpec6] = {}
+    for edge_name, tol6 in allocation.items():
+        specs = [tol6[j] for j in range(6)]
+        for j in _ANGULAR_INDICES:
+            spec = specs[j]
+            if not spec.locked:
+                specs[j] = ToleranceSpec(
+                    distribution=spec.distribution,
+                    bound=spec.bound * factor,
+                    sigma_level=spec.sigma_level,
+                    locked=False,
+                )
+        result[edge_name] = ToleranceSpec6(*specs)
+    return result
+
+
+def _bisect_angular(
+    frame_graph,
+    lo: dict[str, ToleranceSpec6],   # passing allocation (tighter)
+    hi: dict[str, ToleranceSpec6],   # failing allocation (looser)
+    frame_a: str,
+    frame_b: str,
+    target_tolerance,
+    n_validate: int,
+    seed: int,
+    tol: float = 0.005,  # stop when hi/lo angular ratio < 0.5%
+) -> tuple[dict[str, ToleranceSpec6], "ValidationReport"]:
+    """Binary search between lo (passing) and hi (failing) on the angular scale factor.
+
+    Recovers the slack introduced by the fixed gamma step in the damping loop.
+    Returns the loosest allocation that still passes MC validation.
+    """
+    # Extract angular scale from any free angular DoF on any edge (all equal).
+    lo_scale = hi_scale = 1.0
+    for tol6 in lo.values():
+        for j in _ANGULAR_INDICES:
+            if not tol6[j].locked and tol6[j].bound > 0:
+                lo_scale = tol6[j].bound
+                break
+        else:
+            continue
+        break
+    for tol6 in hi.values():
+        for j in _ANGULAR_INDICES:
+            if not tol6[j].locked and tol6[j].bound > 0:
+                hi_scale = tol6[j].bound
+                break
+        else:
+            continue
+        break
+
+    best = lo
+    best_report = None
+
+    while (hi_scale - lo_scale) / max(hi_scale, 1e-12) > tol:
+        mid_scale = (lo_scale + hi_scale) / 2.0
+        ratio = mid_scale / lo_scale
+        mid = _scale_angular(lo, ratio)
+        report = _mc_validate(
+            frame_graph, mid, frame_a, frame_b, target_tolerance, n_validate, seed
+        )
+        if report.passed:
+            best = mid
+            best_report = report
+            lo_scale = mid_scale
+        else:
+            hi_scale = mid_scale
+
+    if best_report is None:
+        best_report = _mc_validate(frame_graph, best, frame_a, frame_b, target_tolerance, n_validate, seed)
+
+    return best, best_report
+
+
+def _mc_validate(
+    frame_graph, allocation, frame_a, frame_b, target_tolerance, n_validate, seed
+) -> "ValidationReport":
+    fg_copy = _copy_frame_graph_with_tolerances(frame_graph, allocation)
+    trial_data = MonteCarloFKEngine.run(fg_copy, n_validate, seed)
+    achieved = point_pair_envelope_box(trial_data, fg_copy, frame_a, frame_b)
+    per_dof_pass = {
+        label: max(abs(achieved[label]["min"]), abs(achieved[label]["max"]))
+               <= target_tolerance[k].bound
+        for k, label in enumerate(DOF_LABELS)
+    }
+    return ValidationReport(
+        achieved_envelope=achieved,
+        passed=all(per_dof_pass.values()),
+        per_dof_pass=per_dof_pass,
+    )
+
+
 # ── AllocationEngine ──────────────────────────────────────────────────────────
 
 class AllocationEngine:
@@ -281,21 +377,9 @@ class AllocationEngine:
         Builds a copy of frame_graph with proposed_tolerances applied, runs
         MonteCarloFKEngine, and compares the achieved envelope to target_tolerance.
         """
-        fg_copy = _copy_frame_graph_with_tolerances(frame_graph, proposed_tolerances)
-        trial_data = MonteCarloFKEngine.run(fg_copy, n_trials, seed)
-        achieved = point_pair_envelope_box(trial_data, fg_copy, frame_a, frame_b)
-
-        per_dof_pass: dict[str, bool] = {}
-        for k, label in enumerate(DOF_LABELS):
-            half_width = max(
-                abs(achieved[label]["min"]), abs(achieved[label]["max"])
-            )
-            per_dof_pass[label] = half_width <= target_tolerance[k].bound
-
-        return ValidationReport(
-            achieved_envelope=achieved,
-            passed=all(per_dof_pass.values()),
-            per_dof_pass=per_dof_pass,
+        return _mc_validate(
+            frame_graph, proposed_tolerances, frame_a, frame_b,
+            target_tolerance, n_trials, seed,
         )
 
     @staticmethod
@@ -349,12 +433,20 @@ class AllocationEngine:
             )
 
         current = copy.deepcopy(baseline)
+        prev = baseline  # last failing allocation (tighter is safer to start)
         for iteration in range(max_iter):
+            prev = current
             current = _damp_angular(current, gamma)
             report = AllocationEngine.validate(
                 frame_graph, current, frame_a, frame_b, target_tolerance, n_validate, seed
             )
             if report.passed:
+                # Binary-search between current (passing) and prev (failing) to
+                # recover the slack introduced by the fixed gamma step size.
+                current, report = _bisect_angular(
+                    frame_graph, current, prev, frame_a, frame_b,
+                    target_tolerance, n_validate, seed,
+                )
                 return AllocationResult(
                     baseline_linear_allocation=baseline,
                     corrected_allocation=current,
