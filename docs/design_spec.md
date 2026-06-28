@@ -1237,7 +1237,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 1. ✅ **Done (A7, `3d7936d`)** Write `examples/single_chain_fk_example.py`: 3-edge CNC spindle alignment chain (`world → spindle_housing → bearing_seat → tool_tip`), mixing `uniform` and `normal` tolerances, 50,000-trial MC run. Prints worst-case envelope box and 50/90/95/99th-percentile table for `tool_tip`. Text output only — `postprocess/reporting.py` (B1-4) deliberately not imported. Demonstrates angular error amplification: a 0.001 rad housing-tilt creates ~0.150 mm tip displacement over 150 mm tool overhang.
 2. ✅ **Done (A7, `3d7936d` initial; `8232c12` extended)** Write `examples/multi_chain_shared_frame_example.py`: optical bench with two lenses sharing a common upstream frame. Extended beyond the original single-scenario plan to a **four-scenario sweep** that decomposes the shared-ancestor cancellation effect: (0) zero lens tolerances — proves bench errors cancel to floating-point zero (1.99e-13 mm); (1) translational seat errors only — shows direct RSS contribution; (2) rotational seat errors only — reveals lever-arm amplification (rz ±0.001 rad × 100 mm separation = ±0.1 mm relative dy, matching the analytical prediction exactly); (3) full tolerances — combination, dominated by rotational lever arm. Includes a summary comparison table and `L × δθ` design rule. Uses `frame_envelope_box()`, `point_pair_envelope_box()` only — no B-1 dependencies.
-3. Write `examples/allocation_example.py` (added once Milestone B-2's `sim/allocation.py` exists): define a chain with unset/free tolerances, specify a target end-effector envelope, run `AllocationEngine.allocate()`, print the resulting `AllocationResult` — including the baseline linear allocation, the corrected allocation, and convergence status — with inline commentary on what the gap between baseline and corrected reveals about the chain's geometric leverage.
+3. ✅ **Done (D-0, `f3538af`)** Write `examples/allocation_example.py`: 3-frame wafer-inspection gantry chain (`wafer_chuck → stage → sensor_head`, 300 mm z-lift + 500 mm x lateral arm). Three sections: (1) unconstrained FK baseline showing ±mm envelope; (2) achievable inverse allocation to ±0.1 mm / ±1 mrad — prints `converged=True`, `iterations_used`, and a side-by-side baseline vs corrected allocation table with Δ% column; (3) non-convergence scenario with locked imprecise stage_mount (±2 mm, `locked=True`) — prints `converged=False`, `iterations_used=10`, achieved envelope vs target, and three engineering remedies (replace component, restructure, relax target). Text output only — no GUI or figure dependencies.
 4. ✅ Each script runs standalone (`python examples/<script>.py`) with no GUI dependency, prints enough intermediate information that a reader can follow the logic without running it. Verified for tasks 1 and 2 above.
 
 **Interfaces:**
@@ -1310,6 +1310,156 @@ All GUI tests use `os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")` at mod
 
 - *Depends on:* every module in the codebase, by design.
 - *Used by:* the project owner and any future Claude Code session, as the primary mechanism for confirming nothing has silently broken between sessions.
+
+**Planned (Milestone D — not yet implemented):**
+
+- **`test_gui_frame_viewer.py`** — D-1: unit tests for `_compute_world_transforms()` helper only (4 tests). `GLViewWidget` rendering is not tested headlessly — OpenGL context initialization is fragile in offscreen CI. Tests cover: single-edge chain gives correct child origin; serial 3-frame chain accumulates translations; 90° rotation edge produces rotated child axes; disconnected components each get their own root identity. Uses the same `isHidden()` / headless-Qt conventions as all other GUI tests.
+- **`test_gui_graph_editor.py` additions** — D-2: 3 new tests for `EditEdgeDialog`: dialog opens pre-populated with the existing edge's name and nominal HTM values; accepting the dialog updates `project.edges[idx]` in-place and emits `project_changed`; cancelling the dialog leaves the project unchanged.
+
+---
+
+## 6.21 `gui/frame_viewer/`
+
+*(Planned — Milestone D-1. Not yet implemented. Feature branch: `feature/d1-d2-viewer-edge-edit`.)*
+
+**Responsibility:** Standalone 3D viewer window for real-time frame pose visualization (during graph editing) and post-simulation Monte Carlo point cloud display. Opens on demand from the View menu — not a permanent dock.
+
+**Deliverables:**
+
+- `gui/frame_viewer/__init__.py` — empty package marker
+- `gui/frame_viewer/frame_viewer_window.py` — `FrameViewerWindow` class + `_compute_world_transforms()` helper
+
+**Key class:** `FrameViewerWindow(QWidget)` with `Qt.WindowType.Window` flag.
+
+**Public API:**
+
+```python
+def update_graph(self, project: ProjectModel) -> None:
+    """Recompute nominal world transforms and redraw frame triads + edge lines."""
+
+def set_result(self, trial_data: TrialData) -> None:
+    """Store MC result; if in point-cloud mode, redraw scatter."""
+
+def clear(self) -> None:
+    """Remove all scene items; forget trial data."""
+```
+
+**Internal architecture:**
+
+- **Viewport:** `pyqtgraph.opengl.GLViewWidget` (OpenGL-based, interactive orbit/zoom/pan via mouse drag, handles N > 500,000 points at 60 fps).
+- **Two display modes:**
+  - *Frames mode* (default): one `GLLinePlotItem` per axis per frame (X=red, Y=green, Z=blue, length auto-scaled to `max(edge_lengths) × 0.1`), plus grey `GLLinePlotItem` lines connecting each frame origin to its parent origin for every edge.
+  - *Point cloud mode:* `GLScatterPlotItem` with `pos=xyz` (shape `(N, 3)`) and `color` mapped through the viridis colormap by z-depth. Frame selector `QComboBox` (visible only in this mode) lets the user choose which frame's distribution to show.
+- **Mode toggle button:** "Show Point Cloud" / "Show Frames"; disabled when no `TrialData` is available.
+- **Point cloud extraction:** `xyz = trial_data.frames[frame_name][:, :3, 3]` — two lines of numpy on data already in memory.
+
+**Key implementation decision — `_compute_world_transforms(project)`:**
+
+```python
+def _compute_world_transforms(project: ProjectModel) -> dict[str, np.ndarray]:
+    """Chain 4×4 HTM matrices from HTMEdgeModel.nominal values only.
+
+    Section 5.3 compliant: no FrameGraph, no core.* imports.
+    Uses Kahn's topological sort algorithm on project.edges.
+    Disconnected components each get their own root (identity transform for root frames).
+    Returns {frame_name: np.ndarray shape (4,4)} — world transform for each frame.
+    """
+```
+
+This is the critical Section 5.3 constraint: the viewer must update in real-time while the user is still editing the graph (before any "Run"), so it cannot build a `FrameGraph` (a core object). Instead, it chains `numpy` 4×4 matrices directly from `HTMEdgeModel.nominal` values (which are `HTMInputXyzEuler` or other `HTMInputModel` subtypes). The helper lives in `gui/frame_viewer/frame_viewer_window.py` and depends only on `numpy` and `persistence.schema`.
+
+**Integration in `MainWindow`:**
+
+- New `View` menu (between File and the application menu): `View → 3D Frame Viewer` shortcut `Ctrl+3`.
+- `MainWindow._frame_viewer: FrameViewerWindow | None = None` — lazy-created on first toggle.
+- `_toggle_frame_viewer()`: creates if None (connecting `destroyed` signal to clear the reference), calls `update_graph(self._project)`, then `show()` + `raise_()`.
+- Hooks added (one line each) to existing handlers:
+  - `_on_graph_editor_changed()` → `if self._frame_viewer: self._frame_viewer.update_graph(self._project)`
+  - `_on_run_completed()` → `if self._frame_viewer: self._frame_viewer.set_result(result)`
+  - `_new_project()` → `if self._frame_viewer: self._frame_viewer.clear()`
+  - `closeEvent()` → `if self._frame_viewer: self._frame_viewer.close()` (before `event.accept()`)
+
+**New dependency:** `pyqtgraph` — added to `requirements.txt`. No other changes to the dependency list.
+
+**Tests:** `tests/test_gui_frame_viewer.py` — 4 unit tests covering `_compute_world_transforms()` only. `GLViewWidget` rendering is not tested headlessly (OpenGL context is fragile in offscreen CI). See Section 6.20 Planned entries.
+
+**Interfaces:**
+
+- *Depends on:* `persistence.schema` (read-only), `sim.monte_carlo_fk.TrialData` (read-only), `pyqtgraph.opengl`, `numpy`.
+- *Used by:* `gui/main_window.py` exclusively.
+
+---
+
+## 6.22 `gui/graph_editor/edit_edge_dialog.py`
+
+*(Planned — Milestone D-2. Not yet implemented. Feature branch: `feature/d1-d2-viewer-edge-edit`.)*
+
+**Responsibility:** In-place editing of an existing `HTMEdgeModel`'s name and nominal transform. Complements `AddEdgeDialog` (which only creates new edges). The parent→child relationship is deliberately not editable — structural changes (reconnecting a joint to a different parent or child) require delete + recreate to maintain DAG integrity.
+
+**Deliverables:**
+
+- `gui/graph_editor/edit_edge_dialog.py` — `EditEdgeDialog` class
+
+**Key class:** `EditEdgeDialog(QDialog)`
+
+**Constructor:**
+
+```python
+def __init__(self, edge: HTMEdgeModel, project: ProjectModel,
+             parent: QWidget | None = None) -> None:
+```
+
+**Layout (mirrors `AddEdgeDialog` structure):**
+
+- `QLabel` showing `"{edge.parent} → {edge.child}"` as read-only grey text with a note "(parent/child cannot be changed here)"
+- `QLineEdit` for edge name, pre-populated with `edge.name`
+- `HTMEntryWidget` pre-populated via `self._htm_entry.set_htm_input_model(edge.nominal)` — `set_htm_input_model()` already exists on `HTMEntryWidget` (line 91 of `htm_entry_widget.py`); this is not new
+- Red error `QLabel` for validation messages
+- Standard OK/Cancel `QDialogButtonBox`
+
+**Validation:**
+
+- Name must be non-empty
+- If name was changed: must not collide with any other edge's name (original name is excluded from the collision check — renaming to the same name is allowed as a no-op)
+- `HTMEntryWidget.is_valid()` must return True (same as `AddEdgeDialog`)
+
+**Result:**
+
+```python
+def result_edge(self) -> HTMEdgeModel:
+    """Return the edited HTMEdgeModel. Only valid after Accepted."""
+```
+
+Returns a new `HTMEdgeModel` with the updated name + nominal, preserving the original `parent`, `child`, and `tolerance` fields unchanged.
+
+**Trigger in `GraphEditorWidget`:**
+
+Two triggers for the edit action:
+1. **Double-click:** `self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)` — calls `_on_edit_edge()` only when the double-clicked item is an edge (not a frame).
+2. **"Edit Selected" button:** added to the button row alongside the existing "Delete Selected" button; enabled only when an edge (not a frame) is selected in the tree.
+
+**`_on_edit_edge()` method in `GraphEditorWidget`:**
+
+```python
+def _on_edit_edge(self) -> None:
+    info = self._tree.selected_item_info()
+    if not info or info[1] != "edge":
+        return
+    edge = next(e for e in self._project.edges if e.name == info[0])
+    dlg = EditEdgeDialog(edge, self._project, parent=self)
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        return
+    updated = dlg.result_edge()
+    idx = next(i for i, e in enumerate(self._project.edges) if e.name == edge.name)
+    self._project.edges[idx] = updated
+    self._tree.refresh(self._project)
+    self.project_changed.emit()
+```
+
+**Interfaces:**
+
+- *Depends on:* `persistence.schema.HTMEdgeModel`, `gui.graph_editor.htm_entry_widget.HTMEntryWidget`.
+- *Used by:* `gui/graph_editor/graph_editor_widget.py` exclusively.
 
 ---
 
@@ -1393,7 +1543,24 @@ All GUI tests use `os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")` at mod
 
 **Milestone C exit criteria:** A double-clickable (or `python main.py`-launchable) desktop application where a user with no Python experience could define a system, set tolerances, run both modes, and extract bounding-shape and sensitivity decisions — backed by the same validated engine from Milestones A, B-1, and B-2.
 
-## 7.5 Deferred / Explicitly Out of Scope for V1.0
+## 7.5 Milestone D — 3D Viewer & Edge Editing
+
+**Goal:** Two focused GUI enhancements that significantly improve the graph-authoring and inspection workflow: a live 3D frame viewer (real-time during editing, point-cloud mode after simulation) and in-place edge editing (eliminating the delete-and-recreate workaround for nominal-transform corrections).
+
+**Feature branch:** `feature/d1-d2-viewer-edge-edit`
+
+**New dependency:** `pyqtgraph` (D-1 only) — added to `requirements.txt`.
+
+**Target: ~15–25 hours.**
+
+| # | Status | Task | Module(s) | Est. Hours |
+|---|---|---|---|---|
+| D-1 | ⬜ Planned | **Live 3D Frame Viewer** — `FrameViewerWindow(QWidget, Qt.Window)` opened via `View → 3D Frame Viewer` (Ctrl+3); two modes: *Frames* (pyqtgraph `GLViewWidget` with coordinate triads + edge lines, real-time update on `project_changed`) and *Point Cloud* (`GLScatterPlotItem` from `trial_data.frames[frame][:, :3, 3]`, viridis depth color); Section 5.3-compliant world-transform helper `_compute_world_transforms()` chains 4×4 numpy matrices from schema only; lazy window creation stored in `MainWindow._frame_viewer`; 4 unit tests for the helper (no headless OpenGL rendering tests) | `gui/frame_viewer/`, `gui/main_window.py`, `tests/test_gui_frame_viewer.py` | 10–16 |
+| D-2 | ⬜ Planned | **Edit Edge Dialog** — `EditEdgeDialog(QDialog)` pre-populated via `HTMEntryWidget.set_htm_input_model(edge.nominal)` (method already exists); parent/child shown read-only; name + nominal HTM editable; duplicate-name check excludes original name; double-click on edge row in `FrameEdgeTree` OR dedicated "Edit Selected" button triggers `GraphEditorWidget._on_edit_edge()` which replaces `project.edges[idx]` in-place + emits `project_changed`; 3 new tests (pre-population, accept updates, cancel no-ops) | `gui/graph_editor/edit_edge_dialog.py`, `gui/graph_editor/graph_editor_widget.py`, `tests/test_gui_graph_editor.py` | 5–9 |
+
+**Milestone D exit criteria:** (1) Opening the 3D viewer window during graph editing shows correct frame coordinate systems in world space, updating live as edges are added or modified. (2) After running FK simulation, the "Show Point Cloud" toggle displays the MC scatter for the selected output frame. (3) Double-clicking any edge in the graph editor tree opens the edit dialog pre-populated; accepting the dialog updates the project and marks it dirty without losing tolerance assignments.
+
+## 7.6 Deferred / Explicitly Out of Scope for V1.0
 
 Recorded here so they are not forgotten, but also not accidentally started early:
 
@@ -1512,4 +1679,5 @@ Because this tool produces engineering decisions about physical hardware toleran
 | 2026-06-28 | Claude (C-4 implementation, including plot visibility fix) | **Implemented `gui/results_viewer/results_viewer_widget.py`** (commit `63cd2ea`, along with C-5). **Key decisions:** (1) **Standalone `_FigureWindow` instead of embedded canvas** (critical fix to original plan): the original spec (Section 6.17) called for embedding `FigureCanvasQTAgg` directly in the dock widget. This was implemented and found to produce invisible/inaccessible plots at typical dock heights — Matplotlib's canvas minimum size constraints prevent it from rendering within a dock that is shorter than the canvas minimum. Fix: `_FigureWindow(QWidget)` with `Qt.WindowType.Window` flag opens as a separate OS window sized 1200×900. `closeEvent` calls `plt.close(self._fig)`. References held in `self._open_windows: list[_FigureWindow]` to prevent garbage collection. (2) `_scrollable(inner)` module-level helper wraps inner pages in `QScrollArea(widgetResizable=True, frameShape=NoFrame)` — standard dock-size-independence pattern. (3) IK alloc table tooltips: when a corrected bound differs from the baseline by `> 1e-9`, a tooltip on the cell shows `"baseline: {b_spec.bound:.6f}"` — visually communicates damping-loop correction. (4) Locked DoF rendered as `"—"` in gray; non-locked rendered as 6-decimal float. (5) "Open Frame Report in New Window" button disabled at construction; enabled in `_update_fk_display()` when a frame's data is loaded; disabled again in `clear()`. 11 tests in `tests/test_gui_results_viewer.py`. |
 | 2026-06-28 | Claude (C-5 implementation) | **Implemented `gui/point_pair_panel/point_pair_panel_widget.py`** and `gui/point_pair_panel/__init__.py` (commit `63cd2ea`, same as C-4). **Key decisions:** (1) **Section 5.3 compliance for connectivity check**: `_are_connected(project, frame_a, frame_b)` builds a `networkx.Graph` from `project.frames`/`project.edges` (Pydantic `FrameModel`/`HTMEdgeModel` instances) directly — never calls `project_model_to_frame_graph()`. Core objects are only constructed in `_update_envelope()`, which runs at display time (after a run), not at selection time. (2) `_repopulate_frame_combos()` uses `blockSignals(True)` on both combos during refill and defaults `_frame_b_combo` to index 1 (not 0) to avoid A==B default. (3) `_on_saved_row_changed(row)` also uses `blockSignals(True)` during combo updates to prevent re-triggering `_on_selection_changed()` during a programmatic load. (4) `_on_selection_changed()` auto-populates name as `f"{frame_a} → {frame_b}"` only when both frames are different AND connected — avoids overwriting a user-typed name when they're tweaking an already-saved analysis. (5) `clear()` only resets `_trial_data`; preserves project and combo state — avoids flicker when New is invoked (the graph/frames would also be reset via `set_project()` called separately). (6) `_fill_envelope_table()` renders values to 6 decimal places; all cells are read-only (`Qt.ItemFlag.ItemIsEnabled` only). **`isHidden()` headless-Qt invariant** first documented in this module's tests — all future GUI tests must use `isHidden()` not `isVisible()` for visibility assertions in offscreen mode (see Section 6.20). 11 tests in `tests/test_gui_point_pair_panel.py`. Suite after C-4 and C-5 combined commit: **295 passed, 0 skipped.** |
 | 2026-06-28 | Claude (C-6 + C-7 implementation) | **Implemented 7 cross-panel integration tests in `tests/test_gui_main_window.py` (C-6)** and **`QSettings` window/dock persistence + Recent Files menu in `gui/main_window.py` (C-7)** (commit `f1ffa2c`). **C-6 key decisions:** (1) All 7 tests call `MainWindow` internal handlers directly (`_on_run_completed`, `_on_graph_editor_changed`, `_new_project`, `_on_run_failed`) — no background threads, no `qtbot.waitSignal`. (2) `_make_trial_data(project)` helper calls `project_model_to_frame_graph()` + `MonteCarloFKEngine.run()` on the main thread — acceptable in tests since it runs in <0.5 s for 50 trials. (3) Tests import `_empty_project` (module-level helper) for clean new-project state. **C-7 key decisions:** (1) `QSettings("TolTransform", "TolTransform")` — both args are the same string (org name and app name); the platform store location is OS-dependent (macOS: `~/Library/Preferences/com.TolTransform.TolTransform.plist`; Linux: `~/.config/TolTransform/TolTransform.conf`; Windows: Registry). (2) `_restore_settings()` called at end of `__init__()` after `_setup_ui()` — dock object names must already be registered (via `setObjectName()` in `_setup_docks()`) before `restoreState()` is called, otherwise the dock positions are ignored. (3) `_save_settings()` called from `closeEvent()` before `event.accept()` — dock state saved at close, not on every layout change. (4) Recent Files: `_add_recent(path)` uses list comprehension `[path] + [p for p in self._recent_files if p != path]` — prepend + dedup in one line, then cap with slice `[:_MAX_RECENT]`. `_open_recent(path)` checks `os.path.exists()` first; on miss, shows `QMessageBox.critical` and calls `_remove_recent()` before returning. (5) "Clear Recent" is a separator + action at the bottom of the recent menu, so it is never shown when the list is empty (the menu shows only the disabled "(No recent files)" entry in that case). **Milestone C complete.** Suite: **302 passed, 0 skipped.** |
+| 2026-06-28 | Claude (D-1 + D-2 planning) | Planned Milestone D on feature branch `feature/d1-d2-viewer-edge-edit`. **D-1 `gui/frame_viewer/`:** `FrameViewerWindow(QWidget, Qt.Window)` opened via `View → 3D Frame Viewer` (Ctrl+3); two modes: *Frames* (pyqtgraph `GLViewWidget` with per-frame coordinate triads via `GLLinePlotItem` in RGB = XYZ, grey edge-connection lines) and *Point Cloud* (`GLScatterPlotItem` from `trial_data.frames[frame][:, :3, 3]`, viridis depth colormap); Section 5.3-compliant world-transform helper `_compute_world_transforms(project)` chains 4×4 numpy matrices from `HTMEdgeModel.nominal` only (no `FrameGraph` or core objects); lazy window stored in `MainWindow._frame_viewer`; 4 unit tests for the helper function (no headless OpenGL rendering tests). New dependency: `pyqtgraph` added to `requirements.txt`. **D-2 `gui/graph_editor/edit_edge_dialog.py`:** `EditEdgeDialog(QDialog)` pre-populated via `HTMEntryWidget.set_htm_input_model(edge.nominal)` (method already existed at line 91); parent/child shown as read-only label; name + nominal HTM editable; duplicate-name check excludes the original name; triggered by double-click on an edge row in `FrameEdgeTree` OR a new "Edit Selected" button; `GraphEditorWidget._on_edit_edge()` replaces `project.edges[idx]` in-place + emits `project_changed`; 3 new tests (pre-population, accept updates project, cancel is a no-op). Spec updated: Sections 6.21, 6.22, 7.5 (Milestone D), 7.6 (formerly 7.5 Deferred), allocation_example.py task marked ✅. |
 
