@@ -317,17 +317,16 @@ class ResultsViewerWidget(QWidget):
         self._clear_per_pair_widgets()
 
         if result.per_pair_validation:
-            for frame_a, frame_b, vr in result.per_pair_validation:
-                # For multi-pair results the "target" is embedded in each pair's
-                # ValidationReport title; we have no per-pair target stored, so
-                # show min/max/pass without a target column.
+            pair_targets = result.per_pair_targets or [None] * len(result.per_pair_validation)
+            for (frame_a, frame_b, vr), pair_target in zip(result.per_pair_validation, pair_targets):
+                target_for_pair = pair_target[2] if pair_target is not None else None
                 title = f"Achieved Envelope: {frame_a} → {frame_b}"
                 passed_label = "✓ PASS" if vr.passed else "✗ FAIL"
                 color = "green" if vr.passed else "red"
                 group = QGroupBox(f"{title}   [{passed_label}]")
                 group.setStyleSheet(f"QGroupBox {{ color: {color}; }}")
                 g_layout = QVBoxLayout(group)
-                table = self._make_achieved_table(vr, target=None)
+                table = self._make_achieved_table(vr, target=target_for_pair)
                 g_layout.addWidget(table)
                 self._per_pair_layout.addWidget(group)
         else:

@@ -59,6 +59,7 @@ class AllocationResult:
     target_tolerance: ToleranceSpec6 | None = None
     method: str = ""
     per_pair_validation: list[tuple[str, str, ValidationReport]] | None = None
+    per_pair_targets: list[tuple[str, str, ToleranceSpec6]] | None = None
 
 
 # ── Allocation objective interface ────────────────────────────────────────────
@@ -856,6 +857,7 @@ class AllocationEngine:
                 status_message="",
                 final_validation_report=combined_report,
                 per_pair_validation=per_pair,
+                per_pair_targets=targets,
                 method=method_name,
             )
 
@@ -880,6 +882,7 @@ class AllocationEngine:
                     status_message="",
                     final_validation_report=combined_report,
                     per_pair_validation=per_pair,
+                    per_pair_targets=targets,
                     method=method_name,
                 )
 
@@ -892,5 +895,6 @@ class AllocationEngine:
             status_message="Allocation could not converge to target budget",
             final_validation_report=combined_report,
             per_pair_validation=per_pair,
+            per_pair_targets=targets,
             method=method_name,
         )
