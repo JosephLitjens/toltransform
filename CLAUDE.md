@@ -60,9 +60,15 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** C (GUI) — C-1 ✅, C-2 ✅, C-3 ✅, C-4 ✅. Next: **C-5** (Point-Pair Analysis).
-- **Last completed task:** C-4 — ResultsViewerWidget + scroll-area fix for all panels. Suite: **284 passed, 0 skipped**.
-- **Next task:** C-5 — Point-Pair Analysis panel.
+- **Current milestone:** C (GUI) — **ALL TASKS COMPLETE ✅** (C-1 through C-7).
+- **Last completed task:** C-6 + C-7 — integration tests + window/dock persistence + Recent Files. Suite: **302 passed, 0 skipped**.
+- **Next task:** None — Milestone C is complete. See Section 7.5 (deferred/out-of-scope) for post-v1.0 ideas.
+
+**✅ C-7 complete:** `gui/main_window.py` — `QSettings("TolTransform", "TolTransform")` saves/restores window geometry, dock layout, and Recent Files list (capped at 5) between sessions. `closeEvent()` saves settings before accepting; `_restore_settings()` called after `_setup_ui()`. Recent Files submenu under `File > Open Recent` with per-entry `_open_recent()` (handles missing file gracefully), `_add_recent()` (prepend+dedup+cap), `_remove_recent()`, `_clear_recent_files()`. `_save_project_as()` also calls `_add_recent()`.
+
+**✅ C-6 complete:** `tests/test_gui_main_window.py` — 7 cross-panel integration tests: FK result routes to results_viewer (page 1) and point_pair_panel (_trial_data set); graph change refreshes run_panel and point_pair_panel frame combos; new_project resets results_viewer to placeholder and clears point_pair_panel trial data; run failure leaves results_viewer on placeholder. Suite: **302 passed**.
+
+**✅ C-5 complete:** `gui/point_pair_panel/` — named (frame_a, frame_b) analysis persistence; connectivity check via networkx; relative-pose envelope via `point_pair_envelope_box()`; saves/deletes from `project.saved_analyses`; `project_changed` signal. Results viewer plots now open in `_FigureWindow` (standalone Qt window) rather than embedded in dock. 11 headless tests. Suite: **295 passed**.
 
 **✅ C-4 complete:** `gui/results_viewer/results_viewer_widget.py` — QStackedWidget with placeholder / FK page / IK page. FK: frame selector combo, envelope table (6 rows, DoF|Min|Max from `frame_envelope_box`), `FigureCanvasQTAgg` embedding `generate_frame_report()` (recreated on frame switch, `plt.close` called on old), Pareto section with frame A/B combos + Compute button → `compute_tolerance_sensitivities` + `generate_sensitivity_report`. IK: convergence status label (✓ green / ✗ orange), corrected allocation table (edge × DoF, locked shown as "—" with tooltip for baseline diff), achieved envelope table (DoF|Min|Max|✓/✗). All three panels (tolerance editor, run panel, results viewer) now wrap content in `QScrollArea(widgetResizable=True)` so docks can be made arbitrarily small. 11 headless tests. Suite: **284 passed**.
 

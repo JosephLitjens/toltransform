@@ -9,14 +9,17 @@ Panels hosted here:
   - ToleranceEditorWidget (C-2) — right dock
   - RunPanelWidget (C-3) — right dock
   - ResultsViewerWidget (C-4) — right dock
-  - Point-Pair Analysis stub (C-5) — right dock
+  - PointPairPanelWidget (C-5) — right dock
+
+Window geometry, dock layout, and the Recent Files list (capped at 5) are
+persisted between sessions via QSettings("TolTransform", "TolTransform").
 """
 
 from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSettings
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
@@ -32,6 +35,8 @@ from gui.run_panel.run_panel_widget import RunPanelWidget
 from gui.tolerance_editor.tolerance_editor_widget import ToleranceEditorWidget
 from persistence.schema import ProjectModel, SimSettingsModel
 from persistence.serializer import ProjectLoadError, load_project, save_project
+
+_MAX_RECENT = 5
 
 
 def _empty_project() -> ProjectModel:
@@ -53,7 +58,9 @@ class MainWindow(QMainWindow):
         self._path: str | None = None
         self._dirty: bool = False
         self._last_run_result: object = None
+        self._recent_files: list[str] = []
         self._setup_ui()
+        self._restore_settings()
         self._update_title()
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -68,6 +75,8 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction("&New", self._new_project, "Ctrl+N")
         file_menu.addAction("&Open...", self._open_project, "Ctrl+O")
+        self._recent_menu = file_menu.addMenu("Open &Recent")
+        self._rebuild_recent_menu()
         file_menu.addSeparator()
         file_menu.addAction("&Save", self._save_project, "Ctrl+S")
         file_menu.addAction("Save &As...", self._save_project_as, "Ctrl+Shift+S")
@@ -123,6 +132,77 @@ class MainWindow(QMainWindow):
         self._run_panel.set_project(self._project)
         self._point_pair_panel.set_project(self._project)
 
+    # ── Settings persistence ──────────────────────────────────────────────────
+
+    def _restore_settings(self) -> None:
+        s = QSettings("TolTransform", "TolTransform")
+        geom = s.value("window/geometry")
+        if geom:
+            self.restoreGeometry(geom)
+        state = s.value("window/state")
+        if state:
+            self.restoreState(state)
+        self._recent_files = s.value("recentFiles", []) or []
+        self._rebuild_recent_menu()
+
+    def _save_settings(self) -> None:
+        s = QSettings("TolTransform", "TolTransform")
+        s.setValue("window/geometry", self.saveGeometry())
+        s.setValue("window/state", self.saveState())
+        s.setValue("recentFiles", self._recent_files)
+
+    # ── Recent Files ──────────────────────────────────────────────────────────
+
+    def _rebuild_recent_menu(self) -> None:
+        self._recent_menu.clear()
+        if not self._recent_files:
+            action = self._recent_menu.addAction("(No recent files)")
+            action.setEnabled(False)
+            return
+        for path in self._recent_files:
+            action = self._recent_menu.addAction(os.path.basename(path))
+            action.setData(path)
+            action.setToolTip(path)
+            action.triggered.connect(lambda checked=False, p=path: self._open_recent(p))
+        self._recent_menu.addSeparator()
+        self._recent_menu.addAction("Clear Recent", self._clear_recent_files)
+
+    def _add_recent(self, path: str) -> None:
+        self._recent_files = [path] + [p for p in self._recent_files if p != path]
+        self._recent_files = self._recent_files[:_MAX_RECENT]
+        self._rebuild_recent_menu()
+
+    def _remove_recent(self, path: str) -> None:
+        self._recent_files = [p for p in self._recent_files if p != path]
+        self._rebuild_recent_menu()
+
+    def _clear_recent_files(self) -> None:
+        self._recent_files = []
+        self._rebuild_recent_menu()
+
+    def _open_recent(self, path: str) -> None:
+        if not self._confirm_discard_changes():
+            return
+        if not os.path.exists(path):
+            self._show_error("File Not Found", f"'{path}' no longer exists.")
+            self._remove_recent(path)
+            return
+        try:
+            project = load_project(path)
+        except ProjectLoadError as exc:
+            self._show_error("Cannot Open Project", str(exc))
+            return
+        self._project = project
+        self._path = path
+        self._graph_editor.set_project(self._project)
+        self._tolerance_editor.set_project(self._project)
+        self._run_panel.set_project(self._project)
+        self._point_pair_panel.set_project(self._project)
+        self._results_viewer.clear()
+        self._set_dirty(False)
+        self._add_recent(path)
+        self.statusBar().showMessage(f"Opened: {os.path.basename(path)}")
+
     # ── File actions ──────────────────────────────────────────────────────────
 
     def _new_project(self) -> None:
@@ -160,6 +240,7 @@ class MainWindow(QMainWindow):
         self._point_pair_panel.set_project(self._project)
         self._results_viewer.clear()
         self._set_dirty(False)
+        self._add_recent(path)
         self.statusBar().showMessage(f"Opened: {os.path.basename(path)}")
 
     def _save_project(self) -> None:
@@ -185,6 +266,7 @@ class MainWindow(QMainWindow):
             path += ".json"
         self._path = path
         self._save_project()
+        self._add_recent(path)
 
     # ── State management ──────────────────────────────────────────────────────
 
@@ -237,6 +319,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self._confirm_discard_changes():
+            self._save_settings()
             event.accept()
         else:
             event.ignore()
