@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from gui.graph_editor.add_edge_dialog import AddEdgeDialog
 from gui.graph_editor.add_frame_dialog import AddFrameDialog
+from gui.graph_editor.edit_edge_dialog import EditEdgeDialog
 from gui.graph_editor.frame_edge_tree import FrameEdgeTree
 from persistence.schema import ProjectModel
 
@@ -57,24 +58,36 @@ class GraphEditorWidget(QWidget):
         btn_row = QHBoxLayout()
         self._add_frame_btn = QPushButton("+ Frame")
         self._add_edge_btn = QPushButton("+ Edge")
+        self._edit_btn = QPushButton("Edit Edge")
+        self._edit_btn.setEnabled(False)
         self._delete_btn = QPushButton("Delete Selected")
         btn_row.addWidget(self._add_frame_btn)
         btn_row.addWidget(self._add_edge_btn)
         btn_row.addStretch()
+        btn_row.addWidget(self._edit_btn)
         btn_row.addWidget(self._delete_btn)
         layout.addLayout(btn_row)
 
         self._add_frame_btn.clicked.connect(self._on_add_frame)
         self._add_edge_btn.clicked.connect(self._on_add_edge)
+        self._edit_btn.clicked.connect(self._on_edit_edge)
         self._delete_btn.clicked.connect(self._on_delete_selected)
         self._tree.currentItemChanged.connect(self._on_tree_selection_changed)
+        self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def _on_tree_selection_changed(self, current, previous) -> None:
         info = self._tree.selected_item_info()
-        if info is not None and info[1] == "edge":
+        is_edge = info is not None and info[1] == "edge"
+        self._edit_btn.setEnabled(is_edge)
+        if is_edge:
             self.edge_selected.emit(info[0])
+
+    def _on_item_double_clicked(self, item, col: int) -> None:
+        info = self._tree.selected_item_info()
+        if info is not None and info[1] == "edge":
+            self._on_edit_edge()
 
     def _on_add_frame(self) -> None:
         if self._project is None:
@@ -99,6 +112,24 @@ class GraphEditorWidget(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._project.edges.append(dlg.result_edge())
+        self.refresh_view()
+        self.project_changed.emit()
+
+    def _on_edit_edge(self) -> None:
+        if self._project is None:
+            return
+        info = self._tree.selected_item_info()
+        if info is None or info[1] != "edge":
+            return
+        edge = next((e for e in self._project.edges if e.name == info[0]), None)
+        if edge is None:
+            return
+        dlg = EditEdgeDialog(edge, self._project, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        updated = dlg.result_edge()
+        idx = next(i for i, e in enumerate(self._project.edges) if e.name == edge.name)
+        self._project.edges[idx] = updated
         self.refresh_view()
         self.project_changed.emit()
 

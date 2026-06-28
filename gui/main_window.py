@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         self._dirty: bool = False
         self._last_run_result: object = None
         self._recent_files: list[str] = []
+        self._frame_viewer = None   # lazily created in _toggle_frame_viewer
         self._setup_ui()
         self._restore_settings()
         self._update_title()
@@ -72,6 +73,9 @@ class MainWindow(QMainWindow):
         self._setup_docks()
 
     def _setup_menu_bar(self) -> None:
+        view_menu = self.menuBar().addMenu("&View")
+        view_menu.addAction("3D Frame Viewer", self._toggle_frame_viewer, "Ctrl+3")
+
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction("&New", self._new_project, "Ctrl+N")
         file_menu.addAction("&Open...", self._open_project, "Ctrl+O")
@@ -215,6 +219,8 @@ class MainWindow(QMainWindow):
         self._run_panel.set_project(self._project)
         self._point_pair_panel.set_project(self._project)
         self._results_viewer.clear()
+        if self._frame_viewer is not None:
+            self._frame_viewer.clear()
         self._set_dirty(False)
         self.statusBar().showMessage("New project created")
 
@@ -276,11 +282,15 @@ class MainWindow(QMainWindow):
         self._tolerance_editor.refresh_view()
         self._run_panel.refresh_view()
         self._point_pair_panel.refresh_view()
+        if self._frame_viewer is not None:
+            self._frame_viewer.update_graph(self._project)
 
     def _on_run_completed(self, result: object) -> None:
         self._last_run_result = result
         self._results_viewer.set_result(result, self._project)
         self._point_pair_panel.set_result(result)
+        if self._frame_viewer is not None:
+            self._frame_viewer.set_result(result)
 
     def _on_run_failed(self, error: str) -> None:
         pass  # RunPanelWidget already shows the error in its own status label
@@ -317,9 +327,24 @@ class MainWindow(QMainWindow):
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
 
+    def _toggle_frame_viewer(self) -> None:
+        if self._frame_viewer is None:
+            from gui.frame_viewer.frame_viewer_window import FrameViewerWindow
+            self._frame_viewer = FrameViewerWindow()
+            self._frame_viewer.destroyed.connect(
+                lambda: setattr(self, "_frame_viewer", None)
+            )
+        self._frame_viewer.update_graph(self._project)
+        if self._last_run_result is not None:
+            self._frame_viewer.set_result(self._last_run_result)
+        self._frame_viewer.show()
+        self._frame_viewer.raise_()
+
     def closeEvent(self, event) -> None:
         if self._confirm_discard_changes():
             self._save_settings()
+            if self._frame_viewer is not None:
+                self._frame_viewer.close()
             event.accept()
         else:
             event.ignore()
