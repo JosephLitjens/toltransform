@@ -60,19 +60,27 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** D — **ALL TASKS COMPLETE ✅** (D-1: 3D frame viewer, D-2: edit edge dialog, plus IK allocation enhancements). All merged to `main` and pushed.
-- **Last completed task:** IK allocation enhancements (RSSAllocation, binary-search refinement, max_iter spinbox, Target ± column) + docs update + merge to main. Suite: **311 passed**.
+- **Current milestone:** D — **ALL TASKS COMPLETE ✅** (D-1: 3D frame viewer, D-2: edit edge dialog, IK allocation enhancements, LoosestAllocation). All merged to `main` and pushed.
+- **Last completed task:** `LoosestAllocation` (log-sum NLP) — replaces equal-spread IK allocation with per-DoF maximization; fixed `_bisect_angular` bug; refactored `_build_result`; 4 new tests; docs updated. Suite: **321 passed**.
 - **Next task:** None — all planned milestones complete. See `docs/design_spec.md` Section 7.6 for deferred/future ideas.
+
+**✅ LoosestAllocation complete (merged to main 2026-06-28):**
+- `LoosestAllocation(AllocationObjective)` added to `sim/allocation.py` — log-sum NLP (`maximize Σ log(b_ij)`) with linear worst-case constraints; now the default in `allocate()` and the GUI.
+- **Why log-sum, not LP:** the linear-sum LP (`maximize Σ b_ij`) finds a polytope vertex and assigns zero bounds to DoFs that compete in the same Jacobian row — unmanufacturable. The log-sum forces every DoF positive via `log(0) = −∞` penalty.
+- `_build_result` refactored from scalar to `np.ndarray` bounds vector — required for per-DoF heterogeneous bounds.
+- `_bisect_angular` bug fixed: `ratio` was computed against an updated `lo_scale` rather than the original base, producing wrong absolute bounds on bisection iterations ≥ 2.
+- 4 new tests including `test_loosest_allocation_no_zero_bounds_on_coupled_chain` — permanent regression guard against LP degeneracy with cross-coupled Jacobians (e.g., `Ry(π/2)` nominal).
+- GUI run panel: "Loosest (LP)" added as first/default entry in the IK Method combo.
 
 **✅ D-2 complete:** `gui/graph_editor/edit_edge_dialog.py` — `EditEdgeDialog(QDialog)` pre-populated via `HTMEntryWidget.set_htm_input_model(edge.nominal)`; parent/child shown as read-only labels; duplicate-name check excludes original name; triggered by double-click on edge row OR "Edit Selected" button in `GraphEditorWidget`; replaces `project.edges[idx]` in-place + emits `project_changed`. 3 new tests.
 
 **✅ D-1 complete:** `gui/frame_viewer/frame_viewer_window.py` — `FrameViewerWindow(QWidget, Qt.Window)` with pyqtgraph `GLViewWidget`; two modes: Frames (per-frame RGB coordinate triads via `GLLinePlotItem`) and Point Cloud (`GLScatterPlotItem` from MC trial data, viridis depth colormap). `_compute_world_transforms(project)` is Section 5.3-compliant (schema types + numpy only, no core objects). Opened via `View → 3D Frame Viewer` (Ctrl+3); live-updates on graph changes and after each run. 4 unit tests (no headless OpenGL rendering tests).
 
 **✅ IK allocation enhancements complete (merged to main 2026-06-28):**
-- `RSSAllocation` class added to `sim/allocation.py` — statistical RSS, sqrt(N) less conservative than `EqualAllocation`; now the default in GUI.
+- `RSSAllocation` class added to `sim/allocation.py` — statistical RSS, sqrt(N) less conservative than `EqualAllocation`.
 - `_bisect_angular()` binary-search refinement — recovers ~10% slack from fixed gamma=0.9 step after damping loop converges.
 - `AllocationResult` gains `target_tolerance` and `method` fields.
-- Run panel: Method combo (Statistical RSS / Worst-Case) + Max iterations spinbox (default 30, range 1–500).
+- Run panel: Method combo (Loosest LP / Statistical RSS / Worst-Case) + Max iterations spinbox (default 30, range 1–500).
 - Results viewer: Target ± column in achieved table; method label in convergence status.
 - SplitAllocation explored and removed (damping loop can only tighten angular DoF; combined RSS of ang+trans could still exceed budget).
 

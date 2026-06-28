@@ -619,17 +619,18 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.7 `sim/allocation.py`
 
-*(Last revised: 2026-06-28 — Claude, allocation engine enhancements: RSSAllocation, binary-search angular refinement, target_tolerance/method on AllocationResult, user-configurable max_iter. See changelog 2026-06-28.)*
+*(Last revised: 2026-06-28 — Claude, LoosestAllocation (log-sum NLP): per-DoF loosest IK allocation, _bisect_angular bug fix, _build_result refactor. See changelog 2026-06-28 entries.)*
 
 **Responsibility:** The inverse tolerance allocation engine (Mode 2, Section 3.2): consumes the shared sensitivity primitive from `core/frame_graph.py` (Section 6.3) to solve the allocation objective, then validates and iteratively corrects the proposed tolerance set via Monte Carlo.
 
 **Deliverables:**
 
-- `AllocationObjective` interface with two implementations: `EqualAllocation` (worst-case linear sum) and `RSSAllocation` (statistical RSS) — both produce a uniform scale factor `s` applied to all free edges
+- `AllocationObjective` interface with three implementations: `EqualAllocation` (worst-case linear sum), `RSSAllocation` (statistical RSS), and **`LoosestAllocation`** (log-sum NLP — the default) — see Step 8 below for the full mathematical treatment of `LoosestAllocation`
+- `_build_result(free_edges, bounds: np.ndarray)` — internal helper that assembles `dict[str, ToleranceSpec6]` from a per-DoF bounds vector of shape `(6*N,)`; replaces the earlier scalar version that could only express a uniform allocation
 - `AllocationEngine.allocate(...)` — the top-level entry point, wrapping the baseline linear solve in an **iterative nonlinear damping/correction loop** with binary-search angular refinement
 - `AllocationEngine.solve(...)` (baseline linear step) and `.validate(...)` (single MC validation pass), both retained as the internal building blocks `allocate()` composes
 - `AllocationResult` output structure explicitly preserving **both** the uncorrected linear baseline and the final nonlinearly-corrected allocation, plus convergence status, target tolerance, and method name
-- `tests/test_allocation.py`, covering allocation-specific behavior (the Jacobian's own correctness is now tested in `tests/test_frame_graph.py`, Section 6.3) and dedicated tests for the damping loop's convergence and non-convergence paths
+- `tests/test_allocation.py`, covering allocation-specific behavior (the Jacobian's own correctness is now tested in `tests/test_frame_graph.py`, Section 6.3) and dedicated tests for the damping loop's convergence, non-convergence, and `LoosestAllocation`-specific properties
 
 **Granular Task List:**
 
@@ -675,19 +676,100 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
    - **MC validation discrepancy reporting:** confirm `validate()` correctly flags a case where the linear allocation under- or over-shoots the nonlinear MC-validated result (construct a case with deliberately large nominal rotation offsets between edges to induce a meaningful nonlinearity, since pure small-angle propagation through near-zero nominal offsets may not exercise this path).
    - **Damping loop convergence test (new, locked decision):** using the same high-leverage geometry constructed for the discrepancy test above, confirm `allocate()` converges within `max_iter`, confirm `corrected_allocation`'s angular bounds are strictly tighter than `baseline_linear_allocation`'s, and confirm the final validation pass actually satisfies the target.
    - **Damping loop non-convergence test (new, locked decision):** construct a deliberately infeasible target (e.g., an unreasonably tight target on a chain with most edges locked) and confirm `allocate()` returns `converged=False` with `status_message == "Allocation could not converge to target budget"` after exactly `max_iter` iterations, without raising an uncaught exception.
+   - **LoosestAllocation tests (new, this revision):** see Step 8 below.
+
+8. ✅ **Done (2026-06-28)** — `LoosestAllocation(AllocationObjective)`: log-sum NLP for per-DoF loosest allocation.
+
+   **Why EqualAllocation / RSSAllocation are suboptimal.**  Both prior objectives collapse the allocation problem to a single global scale factor `s` applied uniformly to every free DoF on every edge.  The binding constraint is the output DoF that gives the smallest `s_k`:
+
+   ```
+   EqualAllocation:   s_k = B_k / Σ_{free (i,j)} |J[k, 6i+j]|
+   RSSAllocation:     s_k = B_k / sqrt(Σ_{free (i,j)} J[k, 6i+j]²)
+   s = min_k(s_k),   b_ij = s  for every free (i,j)
+   ```
+
+   The binding DoF constrains every other DoF even if they are insensitive to it.  Concretely: a 2-edge identity chain with B_dx = 0.01 (tight) and B_rz = 10.0 (loose) gives `s = 0.005` for all DoFs — rz gets 0.005 when it could have 5.0 (1000× waste).
+
+   **Correct formulation — the allocation LP.**  The proper statement of "loosest possible tolerances" is:
+
+   ```
+   maximize  Σ_{free (i,j)} b_ij
+   subject to:
+     Σ_{free (i,j)} |J[k, 6i+j]| · b_ij  ≤  B_k    for each active output DoF k
+     b_ij  ≥  0
+   ```
+
+   This is a linear program.  **Critical problem:** nominal rotations between frames create cross-coupling in the Jacobian — both `ry` and `rz` inputs can appear in the same output constraint row (e.g., `J[4, ry_col] ≠ 0` and `J[4, rz_col] ≠ 0` simultaneously when a frame has a non-trivial nominal rotation about `x`).  The LP finds a vertex of the feasible polytope, which in this case assigns all budget to whichever of the two inputs it encounters first and sets the other to exactly zero.  Physically: zero tolerance is unmanufacturable and meaningless as a design specification.
+
+   **Fix — log-sum NLP (locked, this revision).**  Replace the linear-sum objective with the log-sum:
+
+   ```
+   maximize  Σ_{free (i,j)} log(b_ij)
+   subject to:
+     Σ_{free (i,j)} |J[k, 6i+j]| · b_ij  ≤  B_k    for each active output DoF k
+     b_ij  ≥  ε   (ε = 10⁻¹⁰, a small positive floor)
+   ```
+
+   Key mathematical properties of the log-sum objective:
+   - **No zero solutions:** `log(b) → −∞` as `b → 0`, so the optimizer is infinitely penalized from driving any variable to zero.  Every free DoF always receives a positive bound.
+   - **Balanced allocation under symmetric coupling:** when `J[k, col1] = J[k, col2]` (equal sensitivities in the same constraint row), the log-sum KKT conditions give `b_col1 = b_col2` — equal shares, not the arbitrary vertex the LP finds.
+   - **Proportional allocation under asymmetric coupling:** for a single active constraint with coefficients `a_j` on variables `b_j`, the log-sum KKT gives `b_j* ∝ 1/a_j · (λ⁻¹)` where `λ` is the constraint's Lagrange multiplier — i.e., DoFs with lower sensitivity get proportionally looser bounds.
+   - **Correct unbounded fill for zero-sensitivity DoFs:** a DoF with `J[k, col] = 0` for all `k` is genuinely unconstrained; its log-gradient pushes it toward `CAP = 10⁶`, correctly representing "this DoF can be as loose as desired."
+   - **Convexity:** the constraints are linear (hence convex); the objective is concave (maximization of a concave function); the feasible set is a convex polytope.  The problem is convex NLP, so any local optimum found by the solver is the global optimum.
+
+   **Numerical conditioning fix.**  The initial (SLSQP) implementation failed on chains with widely-varying target magnitudes (e.g., `B_dx = 0.001 rad`, `B_rz = 10 rad` — a 10 000:1 ratio).  The root cause: the earlier warm start used the global equal-allocation scale `s = min_k(B_k / Σ|J_k|)` for all DoFs, placing rz at `s ≈ 10⁻⁴` when the optimum is `≈ 5`.  At this point the log-gradient is `−1/s ≈ −10 000`, while the gradient for dx (already near its optimum) is `≈ −200`.  SLSQP's linesearch diverged under this 50:1 gradient mismatch.
+
+   Two fixes (both locked):
+   1. **Per-DoF warm start.**  For each free variable `j`, find the tightest constraint it appears in and estimate a fair per-DoF share:
+      ```
+      x0[j] = 0.9 × min_k { B_k / (|J[k,j]| × n_sharing_k) }
+      ```
+      where `n_sharing_k` = number of free variables contributing to constraint `k`.  This places each variable near its own binding point; gradient magnitudes are uniformly `O(1/b_j*)` with no cross-scale mismatch.
+   2. **Switched to `scipy.optimize.minimize(method="trust-constr")` with `LinearConstraint`.**  The trust-region method tolerates gradient scale differences (it rescales implicitly via the Hessian approximation); the linesearch-based SLSQP does not.
+
+   **`_bisect_angular` bug fix (locked, this revision).**  The binary-search refinement had a subtle bug: `lo_scale` (the current lower bound on the absolute angular value) was updated each passing iteration, but `lo` (the allocation object passed to `_scale_angular`) was never updated.  On the second bisection iteration, `ratio = mid_scale / lo_scale` used the *updated* `lo_scale` rather than the original `lo` allocation's bound, so `_scale_angular(lo, ratio)` produced the wrong absolute value:
+
+   ```
+   # Before fix (wrong):
+   ratio = mid_scale / lo_scale   # lo_scale updated each iter, lo is still original
+   mid = _scale_angular(lo, ratio)
+   # → mid.b_rz = lo_original.b_rz × (new_mid / prev_passing_mid)  ← wrong
+   ```
+
+   Fix: introduce `base_scale = lo_scale` before the loop and always divide by it:
+
+   ```
+   # After fix (correct):
+   base_scale = lo_scale   # never updated
+   ...
+   ratio = mid_scale / base_scale   # always relative to original lo
+   mid = _scale_angular(lo, ratio)
+   # → mid.b_rz = lo_original.b_rz × (new_mid / lo_original.b_rz) = new_mid  ✓
+   ```
+
+   This bug was latent because `_bisect_angular` is only called when the damping loop finds a passing iteration, and for equal-allocation (all angular bounds equal) the first bisection iteration usually meets the 0.5% tolerance criterion immediately — leaving no subsequent iterations during which the wrong `lo_scale` update could manifest.  With `LoosestAllocation`, heterogeneous bounds mean more bisection iterations are common, making the bug visible.
+
+   **`_build_result` refactor (locked, this revision).**  The helper that assembles per-edge `ToleranceSpec6` dicts was previously `_build_result(free_edges, s: float)` — a single scalar applied uniformly.  Refactored to `_build_result(free_edges, bounds: np.ndarray)` where `bounds` is shape `(6*N,)` with one entry per `(edge, DoF)`.  `EqualAllocation` and `RSSAllocation` construct a uniform `np.full(6*N, s)` array and call the new signature; `LoosestAllocation` passes the NLP solution vector directly.
+
+   **Tests for LoosestAllocation (4 new, in `tests/test_allocation.py`):**
+   - `test_loosest_allocation_beats_equal_on_mixed_target`: 2-edge identity chain, `B_dx = 0.01` / `B_rz = 10.0`.  Asserts `Σ LP_rz > 50 × Σ Equal_rz` (LP fills the rz budget; equal allocation wastes it).
+   - `test_loosest_allocation_mc_validation_passes`: simple 3-edge chain, LP allocation with modest target; validate with 50% margin check target — confirms LP result is feasible under MC.
+   - `test_loosest_allocation_no_zero_bounds_on_coupled_chain` **(regression test, critical)**: single-edge chain with `Ry(π/2)` nominal — this rotation creates Jacobian cross-coupling between ry and rz inputs in the ry-output row.  Asserts all 6 per-DoF bounds `> 1e-6`.  This test would have failed with the original LP.
+   - `test_loosest_allocation_lever_arm_converges`: `LoosestAllocation` + damping loop on the lever-arm chain — confirms the NLP + correction loop pipeline converges end-to-end.
 
 **Interfaces:**
 
-- *Depends on:* `core/frame_graph.py` (`FrameGraph`, `path_edges_between()`, `adjoint()`, `compute_sensitivity()` — relocated here per Mod 2), `core/tolerance.py` (`ToleranceSpec6`), `core/transforms.py` (`HTM`), `sim/monte_carlo_fk.py` (`MonteCarloFKEngine`, for the validation pass — called once per damping-loop iteration, up to `max_iter` times), `postprocess/stats.py` (envelope computation for validation), `scipy.optimize` (reserved for future non-closed-form objectives — not required for v1's `EqualAllocation`).
-- *Used by:* eventually `gui/run_panel/` and `gui/results_viewer/` (Milestone B-2) — the GUI's "Run" action for IK mode calls `allocate()`, not `solve()` directly, so the damping correction is always applied by default.
+- *Depends on:* `core/frame_graph.py` (`FrameGraph`, `path_edges_between()`, `adjoint()`, `compute_sensitivity()` — relocated here per Mod 2), `core/tolerance.py` (`ToleranceSpec6`), `core/transforms.py` (`HTM`), `sim/monte_carlo_fk.py` (`MonteCarloFKEngine`, for the validation pass — called once per damping-loop iteration, up to `max_iter` times), `postprocess/stats.py` (envelope computation for validation), `scipy.optimize` (`minimize`, `LinearConstraint`, `Bounds` — used by `LoosestAllocation`).
+- *Used by:* `gui/run_panel/` and `gui/results_viewer/` — the GUI's "Run" action for IK mode calls `allocate()`, not `solve()` directly, so the damping correction is always applied by default.
 - *Public API (conceptual):*
   ```
   AllocationObjective.solve(sensitivity_matrix, target_tolerance, free_edges) -> dict
-  EqualAllocation(AllocationObjective)   # worst-case linear sum
-  RSSAllocation(AllocationObjective)     # statistical RSS (default in GUI)
+  EqualAllocation(AllocationObjective)    # worst-case linear sum, single scale factor
+  RSSAllocation(AllocationObjective)      # statistical RSS, single scale factor
+  LoosestAllocation(AllocationObjective)  # log-sum NLP, per-DoF bounds (DEFAULT)
   AllocationEngine.solve(frame_graph, frame_a, frame_b, target_tolerance, objective=EqualAllocation()) -> dict[str, ToleranceSpec6]
   AllocationEngine.validate(frame_graph, proposed_tolerances, frame_a, frame_b, n_trials, seed) -> ValidationReport
-  AllocationEngine.allocate(frame_graph, frame_a, frame_b, target_tolerance, objective=RSSAllocation(),
+  AllocationEngine.allocate(frame_graph, frame_a, frame_b, target_tolerance, objective=LoosestAllocation(),
                              n_validate=1000, gamma=0.9, max_iter=30, seed=...) -> AllocationResult
   AllocationResult(baseline_linear_allocation, corrected_allocation, converged, iterations_used,
                     status_message, final_validation_report, target_tolerance, method)
@@ -1684,4 +1766,5 @@ Because this tool produces engineering decisions about physical hardware toleran
 | 2026-06-28 | Claude (C-6 + C-7 implementation) | **Implemented 7 cross-panel integration tests in `tests/test_gui_main_window.py` (C-6)** and **`QSettings` window/dock persistence + Recent Files menu in `gui/main_window.py` (C-7)** (commit `f1ffa2c`). **C-6 key decisions:** (1) All 7 tests call `MainWindow` internal handlers directly (`_on_run_completed`, `_on_graph_editor_changed`, `_new_project`, `_on_run_failed`) — no background threads, no `qtbot.waitSignal`. (2) `_make_trial_data(project)` helper calls `project_model_to_frame_graph()` + `MonteCarloFKEngine.run()` on the main thread — acceptable in tests since it runs in <0.5 s for 50 trials. (3) Tests import `_empty_project` (module-level helper) for clean new-project state. **C-7 key decisions:** (1) `QSettings("TolTransform", "TolTransform")` — both args are the same string (org name and app name); the platform store location is OS-dependent (macOS: `~/Library/Preferences/com.TolTransform.TolTransform.plist`; Linux: `~/.config/TolTransform/TolTransform.conf`; Windows: Registry). (2) `_restore_settings()` called at end of `__init__()` after `_setup_ui()` — dock object names must already be registered (via `setObjectName()` in `_setup_docks()`) before `restoreState()` is called, otherwise the dock positions are ignored. (3) `_save_settings()` called from `closeEvent()` before `event.accept()` — dock state saved at close, not on every layout change. (4) Recent Files: `_add_recent(path)` uses list comprehension `[path] + [p for p in self._recent_files if p != path]` — prepend + dedup in one line, then cap with slice `[:_MAX_RECENT]`. `_open_recent(path)` checks `os.path.exists()` first; on miss, shows `QMessageBox.critical` and calls `_remove_recent()` before returning. (5) "Clear Recent" is a separator + action at the bottom of the recent menu, so it is never shown when the list is empty (the menu shows only the disabled "(No recent files)" entry in that case). **Milestone C complete.** Suite: **302 passed, 0 skipped.** |
 | 2026-06-28 | Claude (D-1 + D-2 planning) | Planned Milestone D on feature branch `feature/d1-d2-viewer-edge-edit`. **D-1 `gui/frame_viewer/`:** `FrameViewerWindow(QWidget, Qt.Window)` opened via `View → 3D Frame Viewer` (Ctrl+3); two modes: *Frames* (pyqtgraph `GLViewWidget` with per-frame coordinate triads via `GLLinePlotItem` in RGB = XYZ, grey edge-connection lines) and *Point Cloud* (`GLScatterPlotItem` from `trial_data.frames[frame][:, :3, 3]`, viridis depth colormap); Section 5.3-compliant world-transform helper `_compute_world_transforms(project)` chains 4×4 numpy matrices from `HTMEdgeModel.nominal` only (no `FrameGraph` or core objects); lazy window stored in `MainWindow._frame_viewer`; 4 unit tests for the helper function (no headless OpenGL rendering tests). New dependency: `pyqtgraph` added to `requirements.txt`. **D-2 `gui/graph_editor/edit_edge_dialog.py`:** `EditEdgeDialog(QDialog)` pre-populated via `HTMEntryWidget.set_htm_input_model(edge.nominal)` (method already existed at line 91); parent/child shown as read-only label; name + nominal HTM editable; duplicate-name check excludes the original name; triggered by double-click on an edge row in `FrameEdgeTree` OR a new "Edit Selected" button; `GraphEditorWidget._on_edit_edge()` replaces `project.edges[idx]` in-place + emits `project_changed`; 3 new tests (pre-population, accept updates project, cancel is a no-op). Spec updated: Sections 6.21, 6.22, 7.5 (Milestone D), 7.6 (formerly 7.5 Deferred), allocation_example.py task marked ✅. |
 | 2026-06-28 | Claude (allocation engine enhancements, feature branch → main) | **IK allocation improvements implemented and merged to main.** (1) **`RSSAllocation`** class added to `sim/allocation.py` — statistical RSS formula (`s = min_k { B_k / sqrt(Σ J[k,col]²) }`), sqrt(N) times less conservative than `EqualAllocation` for N independent contributors; becomes the default objective in the GUI. (2) **Binary-search angular refinement** (`_bisect_angular`): after the fixed-step damping loop finds the first passing iteration, binary-searches between the last failing and first passing allocations to within 0.5% relative tolerance — eliminates the ~10% slack inherent in a fixed `gamma=0.9` step. `_mc_validate()` extracted as a shared helper used by both `validate()` and the bisection. (3) **`AllocationResult`** gains `target_tolerance: ToleranceSpec6 \| None` and `method: str` fields so the results viewer can display what was asked for and which objective was used. (4) **IK results viewer** (`gui/results_viewer/`): achieved-bounds table gains a "Target ±" column (5 columns total: DoF / Target ± / Min / Max / Pass?); status label now appends `[Statistical (RSS)]` or `[Worst-Case]`. (5) **Run panel** (`gui/run_panel/`): Method `QComboBox` added to IK group ("Statistical (RSS)" default / "Worst-Case (Linear Sum)"); **Max iterations `QSpinBox`** added (default 30, range 1–500), wired to `AllocationEngine.allocate(max_iter=...)` — lets users increase iterations when the solver is close but not converging. (6) **`SplitAllocation`** explored but removed — a two-step solver that computed separate bounds for translational vs. angular DoF hit fundamental limitations (single damping loop only tightens angular DoF; combined RSS of ang+trans contributions could exceed budget). Suite: **311 passed** on merge. |
+| 2026-06-28 | Project Owner (request), Claude (implementation) | **`LoosestAllocation` (log-sum NLP) added to `sim/allocation.py`; becomes the new default IK objective in `allocate()` and the GUI.** Motivated by a practical failure of the prior single-scale-factor approach: `EqualAllocation` and `RSSAllocation` both compute a single global `s = min_k(s_k)` and apply it uniformly — so a tight dx target (e.g., 0.001 rad) suppresses rz to the same tight value even when the rz budget is 10 rad and the two DoFs are structurally independent. The correct formulation maximises all free-DoF bounds individually subject to the output-envelope constraints. **Phase 1 — LP (superseded).** The initial implementation used a linear-sum LP (`maximize Σ b_ij`, `|J| @ b ≤ B`). Nominal rotations between frames create Jacobian cross-coupling: when J[4, ry_col] and J[4, rz_col] are both nonzero (ry and rz inputs both contribute to the Ry output), the LP finds a polytope vertex and assigns all budget to one DoF while setting the other to exactly zero. Tested: a single `Ry(π/2)` edge produced b_ry or b_rz = 0.0000000 — unmanufacturable and useless. **Phase 2 — Log-sum NLP (current, locked).** Replace the linear-sum objective with `maximize Σ log(b_ij)`. Because `log(b) → −∞` as `b → 0`, every variable is infinitely penalized from reaching zero, and the optimizer distributes budget proportionally rather than concentrating it at a vertex. Under symmetric coupling (J coefficients equal), the log-sum KKT conditions produce equal shares; under asymmetric coupling, shares are proportional to 1/J[k,col] for the binding constraint's Lagrange multiplier. The problem remains convex NLP (concave objective, linear constraints) so any local optimum is global. Implemented via `scipy.optimize.minimize(method="trust-constr")` with `LinearConstraint` and `Bounds`. **Numerical conditioning:** the original SLSQP warm-start used the global equal-allocation `s` for all DoFs; with a 10 000:1 target ratio this created log-gradients differing by 4 orders of magnitude and destabilised the linesearch. Fix: per-DoF warm start `x0[j] = 0.9 × min_k { B_k / (|J[k,j]| × n_sharing_k) }` (each variable starts near its own binding point); switched to trust-constr (trust-region, not linesearch, handles gradient scale mismatch). **`_bisect_angular` bug fix (same commit):** `lo_scale` was updated each bisection iteration but `lo` (the allocation object) was not, so `ratio = mid_scale / lo_scale` used a stale denominator and `_scale_angular(lo, ratio)` produced wrong absolute values on iterations ≥ 2. Fix: `base_scale = lo_scale` frozen before the loop; `ratio = mid_scale / base_scale` always. **`_build_result` refactored** from `(free_edges, s: float)` to `(free_edges, bounds: np.ndarray)` — required to express per-DoF heterogeneous bounds from the NLP; EqualAllocation/RSSAllocation pass `np.full(6*N, s)`. **GUI:** "Loosest (LP)" added as first entry in the IK Method combo (`gui/run_panel/`). **4 new tests in `tests/test_allocation.py`** including a regression test (`test_loosest_allocation_no_zero_bounds_on_coupled_chain`) that fails with the LP and passes with the log-sum NLP — locked as a permanent regression guard. Suite: **321 passed**. |
 
