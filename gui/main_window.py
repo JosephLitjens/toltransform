@@ -20,13 +20,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
-    QLabel,
     QMainWindow,
     QMessageBox,
     QWidget,
 )
 
 from gui.graph_editor.graph_editor_widget import GraphEditorWidget
+from gui.point_pair_panel.point_pair_panel_widget import PointPairPanelWidget
 from gui.results_viewer.results_viewer_widget import ResultsViewerWidget
 from gui.run_panel.run_panel_widget import RunPanelWidget
 from gui.tolerance_editor.tolerance_editor_widget import ToleranceEditorWidget
@@ -110,18 +110,18 @@ class MainWindow(QMainWindow):
         rv_dock.setWidget(self._results_viewer)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, rv_dock)
 
-        # Stub for C-5
-        stub = QLabel("Point-Pair Analysis\n(C-5 — not yet implemented)")
-        stub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        stub.setStyleSheet("color: gray; font-style: italic; padding: 20px;")
+        # Point-Pair Analysis (C-5)
+        self._point_pair_panel = PointPairPanelWidget()
+        self._point_pair_panel.project_changed.connect(self._on_project_changed)
         pp_dock = QDockWidget("Point-Pair Analysis", self)
         pp_dock.setObjectName("PointPairAnalysisDock")
-        pp_dock.setWidget(stub)
+        pp_dock.setWidget(self._point_pair_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, pp_dock)
 
         self._graph_editor.set_project(self._project)
         self._tolerance_editor.set_project(self._project)
         self._run_panel.set_project(self._project)
+        self._point_pair_panel.set_project(self._project)
 
     # ── File actions ──────────────────────────────────────────────────────────
 
@@ -133,6 +133,7 @@ class MainWindow(QMainWindow):
         self._graph_editor.set_project(self._project)
         self._tolerance_editor.set_project(self._project)
         self._run_panel.set_project(self._project)
+        self._point_pair_panel.set_project(self._project)
         self._results_viewer.clear()
         self._set_dirty(False)
         self.statusBar().showMessage("New project created")
@@ -156,6 +157,7 @@ class MainWindow(QMainWindow):
         self._graph_editor.set_project(self._project)
         self._tolerance_editor.set_project(self._project)
         self._run_panel.set_project(self._project)
+        self._point_pair_panel.set_project(self._project)
         self._results_viewer.clear()
         self._set_dirty(False)
         self.statusBar().showMessage(f"Opened: {os.path.basename(path)}")
@@ -191,10 +193,12 @@ class MainWindow(QMainWindow):
         self._set_dirty(True)
         self._tolerance_editor.refresh_view()
         self._run_panel.refresh_view()
+        self._point_pair_panel.refresh_view()
 
     def _on_run_completed(self, result: object) -> None:
         self._last_run_result = result
         self._results_viewer.set_result(result, self._project)
+        self._point_pair_panel.set_result(result)
 
     def _on_run_failed(self, error: str) -> None:
         pass  # RunPanelWidget already shows the error in its own status label

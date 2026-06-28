@@ -141,12 +141,12 @@ def test_results_viewer_fk_envelope_values_match_stats(qtbot):
         assert abs(max_val - expected[dof]["max"]) < 1e-9
 
 
-def test_results_viewer_fk_canvas_created(qtbot):
+def test_results_viewer_fk_view_button_enabled(qtbot):
     widget = ResultsViewerWidget()
     qtbot.addWidget(widget)
     widget.set_result(_make_trial_data(), _make_project())
 
-    assert widget._fk_canvas is not None
+    assert widget._view_report_btn.isEnabled()
 
 
 def test_results_viewer_ik_shows_ik_page(qtbot):

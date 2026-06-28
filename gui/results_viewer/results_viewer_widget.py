@@ -5,13 +5,17 @@ Read-only. MainWindow calls set_result(result, project) after each run and
 clear() on New / Open. No signals out, no project write-back.
 
 FK mode (TrialData):
-    - Frame selector → per-frame envelope table + generate_frame_report() figure
-    - Pareto sensitivity section (on-demand, frame A/B selection required)
+    - Frame selector → per-frame envelope table
+    - "Open Frame Report" button → new window with generate_frame_report() figure
+    - Pareto section → "Compute & Open" button → new window with sensitivity chart
 
 IK mode (AllocationResult):
     - Convergence status label
     - Corrected allocation table (edge × DoF; locked DoFs shown as "—")
     - Achieved envelope table (DoF | Min | Max | Pass?) from ValidationReport
+
+All Matplotlib figures open in standalone QWidget windows rather than embedded in
+the dock — avoids the fixed-size canvas / dock sizing problem.
 """
 
 from __future__ import annotations
@@ -43,6 +47,24 @@ from sim.allocation import AllocationResult
 from sim.monte_carlo_fk import TrialData
 
 
+class _FigureWindow(QWidget):
+    """Standalone window hosting a single Matplotlib figure."""
+
+    def __init__(self, fig, title: str) -> None:
+        super().__init__(None, Qt.WindowType.Window)
+        self._fig = fig
+        canvas = FigureCanvas(fig)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(canvas)
+        self.setWindowTitle(title)
+        self.resize(1200, 900)
+
+    def closeEvent(self, event) -> None:
+        plt.close(self._fig)
+        super().closeEvent(event)
+
+
 def _scrollable(inner: QWidget) -> QScrollArea:
     sa = QScrollArea()
     sa.setWidgetResizable(True)
@@ -72,10 +94,7 @@ class ResultsViewerWidget(QWidget):
         super().__init__(parent)
         self._project: ProjectModel | None = None
         self._trial_data: TrialData | None = None
-        self._fk_figure = None
-        self._pareto_figure = None
-        self._fk_canvas: FigureCanvas | None = None
-        self._pareto_canvas: FigureCanvas | None = None
+        self._open_windows: list[_FigureWindow] = []
         self._setup_ui()
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -92,7 +111,7 @@ class ResultsViewerWidget(QWidget):
     def clear(self) -> None:
         self._project = None
         self._trial_data = None
-        self._close_figures()
+        self._close_windows()
         self._stack.setCurrentIndex(0)
 
     # ── UI construction ────────────────────────────────────────────────────────
@@ -123,7 +142,10 @@ class ResultsViewerWidget(QWidget):
         frame_row.addWidget(self._frame_combo, stretch=1)
         layout.addLayout(frame_row)
 
-        # Envelope table
+        self._view_report_btn = QPushButton("Open Frame Report in New Window")
+        self._view_report_btn.setEnabled(False)
+        layout.addWidget(self._view_report_btn)
+
         env_group = QGroupBox("Envelope (min/max per DoF)")
         env_layout = QVBoxLayout(env_group)
         self._envelope_table = QTableWidget(6, 3)
@@ -136,15 +158,8 @@ class ResultsViewerWidget(QWidget):
         env_layout.addWidget(self._envelope_table)
         layout.addWidget(env_group)
 
-        # Frame report figure (canvas created on demand in _update_fk_display)
-        fig_group = QGroupBox("Frame Error Report")
-        self._fk_canvas_layout = QVBoxLayout(fig_group)
-        layout.addWidget(fig_group)
-
-        # Pareto section
         pareto_group = QGroupBox("Pareto Sensitivity (on demand)")
         pareto_layout = QVBoxLayout(pareto_group)
-
         ctrl_row = QHBoxLayout()
         ctrl_row.addWidget(QLabel("Frame A:"))
         self._pareto_a_combo = QComboBox()
@@ -155,22 +170,19 @@ class ResultsViewerWidget(QWidget):
         self._pareto_b_combo = QComboBox()
         self._pareto_b_combo.setMinimumWidth(100)
         ctrl_row.addWidget(self._pareto_b_combo, stretch=1)
-        self._pareto_btn = QPushButton("Compute")
-        self._pareto_btn.setMaximumWidth(80)
+        self._pareto_btn = QPushButton("Compute && Open")
+        self._pareto_btn.setMaximumWidth(120)
         ctrl_row.addWidget(self._pareto_btn)
         pareto_layout.addLayout(ctrl_row)
-
         self._pareto_status_label = QLabel()
         self._pareto_status_label.setWordWrap(True)
         pareto_layout.addWidget(self._pareto_status_label)
-
-        self._pareto_canvas_layout = QVBoxLayout()
-        pareto_layout.addLayout(self._pareto_canvas_layout)
-
         layout.addWidget(pareto_group)
+
         layout.addStretch()
 
         self._frame_combo.currentIndexChanged.connect(self._on_frame_changed)
+        self._view_report_btn.clicked.connect(self._on_view_report_clicked)
         self._pareto_btn.clicked.connect(self._compute_pareto)
 
         return page
@@ -215,8 +227,8 @@ class ResultsViewerWidget(QWidget):
     # ── FK display ─────────────────────────────────────────────────────────────
 
     def _show_fk(self, trial_data: TrialData) -> None:
-        self._close_figures()
         self._pareto_status_label.setText("")
+        self._view_report_btn.setEnabled(False)
 
         frame_names = list(trial_data.frame_poses.keys())
 
@@ -249,25 +261,22 @@ class ResultsViewerWidget(QWidget):
     def _update_fk_display(self, frame_name: str) -> None:
         envelope = frame_envelope_box(self._trial_data, frame_name)
         _fill_envelope_table(self._envelope_table, envelope)
+        self._view_report_btn.setEnabled(True)
 
-        if self._fk_figure is not None:
-            plt.close(self._fk_figure)
-        self._fk_figure = generate_frame_report(self._trial_data, frame_name)
-
-        # Replace canvas widget in the group box layout
-        if self._fk_canvas is not None:
-            self._fk_canvas_layout.removeWidget(self._fk_canvas)
-            self._fk_canvas.setParent(None)
-            self._fk_canvas.deleteLater()
-
-        self._fk_canvas = FigureCanvas(self._fk_figure)
-        self._fk_canvas_layout.addWidget(self._fk_canvas)
+    def _on_view_report_clicked(self) -> None:
+        if self._trial_data is None:
+            return
+        frame_name = self._frame_combo.currentText()
+        if not frame_name:
+            return
+        fig = generate_frame_report(self._trial_data, frame_name)
+        win = _FigureWindow(fig, f"Frame Report: {frame_name}")
+        self._open_windows.append(win)
+        win.show()
 
     # ── IK display ─────────────────────────────────────────────────────────────
 
     def _show_ik(self, result: AllocationResult) -> None:
-        self._close_figures()
-
         if result.converged:
             if result.iterations_used == 0:
                 status = "✓ Baseline linear allocation passed validation"
@@ -331,25 +340,20 @@ class ResultsViewerWidget(QWidget):
         try:
             fg = project_model_to_frame_graph(self._project)
             report = compute_tolerance_sensitivities(fg, frame_a, frame_b)
-            if self._pareto_figure is not None:
-                plt.close(self._pareto_figure)
-            self._pareto_figure = generate_sensitivity_report(report)
-            if self._pareto_canvas is not None:
-                self._pareto_canvas_layout.removeWidget(self._pareto_canvas)
-                self._pareto_canvas.setParent(None)
-                self._pareto_canvas.deleteLater()
-            self._pareto_canvas = FigureCanvas(self._pareto_figure)
-            self._pareto_canvas_layout.addWidget(self._pareto_canvas)
+            fig = generate_sensitivity_report(report)
+            win = _FigureWindow(fig, f"Pareto Sensitivity: {frame_a} → {frame_b}")
+            self._open_windows.append(win)
+            win.show()
             self._pareto_status_label.setText("")
         except Exception as exc:
             self._pareto_status_label.setText(f"Error: {exc}")
 
     # ── Cleanup ────────────────────────────────────────────────────────────────
 
-    def _close_figures(self) -> None:
-        if self._fk_figure is not None:
-            plt.close(self._fk_figure)
-            self._fk_figure = None
-        if self._pareto_figure is not None:
-            plt.close(self._pareto_figure)
-            self._pareto_figure = None
+    def _close_windows(self) -> None:
+        for win in self._open_windows:
+            try:
+                win.close()
+            except RuntimeError:
+                pass
+        self._open_windows.clear()
