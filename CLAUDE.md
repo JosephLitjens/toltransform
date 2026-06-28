@@ -60,9 +60,18 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** D — **ALL TASKS COMPLETE ✅** (D-1: 3D frame viewer, D-2: edit edge dialog, IK allocation enhancements, LoosestAllocation). All merged to `main` and pushed.
-- **Last completed task:** `LoosestAllocation` (log-sum NLP) — replaces equal-spread IK allocation with per-DoF maximization; fixed `_bisect_angular` bug; refactored `_build_result`; 4 new tests; docs updated. Suite: **321 passed**.
+- **Current milestone:** Multi-pair IK allocation — **COMPLETE ✅**. Merged to `main` and pushed.
+- **Last completed task:** Multi-pair IK allocation — `allocate_multi` / `solve_multi`, per-pair results display, 5 new tests, docs updated. Suite: **239 passed** (non-GUI tests; 302 passed including GUI tests if PySide6 available).
 - **Next task:** None — all planned milestones complete. See `docs/design_spec.md` Section 7.6 for deferred/future ideas.
+
+**✅ Multi-pair IK allocation complete (merged to main 2026-06-28):**
+- `AllocationEngine.solve_multi(fg, targets)` — builds stacked padded Jacobian `A ∈ ℝ^{C × n_free}` from all P pairs' paths; calls `LoosestAllocation._run_nlp(A, b)` to find globally-consistent per-DoF bounds. Shared edges appear in multiple constraint rows and are automatically constrained by the tightest binding pair.
+- `AllocationEngine.allocate_multi(fg, targets, ...)` — full pipeline: `solve_multi` + MC validation for ALL pairs simultaneously + `_bisect_angular_multi` + damping loop. "Failed" = any pair fails; `gamma` applied uniformly to all free angular bounds.
+- `LoosestAllocation._run_nlp(A, b)` extracted from `solve()` — shared by single-pair and multi-pair paths with no duplication.
+- `AllocationResult` gains `per_pair_validation` and `per_pair_targets` fields; `None` for single-pair `allocate()` results.
+- GUI run panel: single frame-pair UI replaced by dynamic `_ConstraintRowWidget` list with "Add Constraint" / "✕" buttons.
+- GUI results viewer: per-pair `QGroupBox` with pass/fail title color and `DoF | Target ± | Min | Max | Pass?` table per pair.
+- 5 new tests (16 total in `tests/test_allocation.py`): shared-edge correctness (key correctness test), independent-pair isolation, result structure, MC validation with margin, lever-arm multi-pair convergence.
 
 **✅ LoosestAllocation complete (merged to main 2026-06-28):**
 - `LoosestAllocation(AllocationObjective)` added to `sim/allocation.py` — log-sum NLP (`maximize Σ log(b_ij)`) with linear worst-case constraints; now the default in `allocate()` and the GUI.
