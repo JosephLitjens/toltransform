@@ -47,6 +47,8 @@ class AllocationResult:
     iterations_used: int
     status_message: str
     final_validation_report: ValidationReport
+    target_tolerance: ToleranceSpec6 | None = None
+    method: str = ""
 
 
 # ── Allocation objective interface ────────────────────────────────────────────
@@ -80,18 +82,40 @@ class AllocationObjective(ABC):
         """
 
 
+def _build_free_mask(free_edges: list, N: int) -> np.ndarray:
+    """Boolean mask (6*N,): True where edge DoF is not locked."""
+    mask = np.zeros(6 * N, dtype=bool)
+    for i, edge in enumerate(free_edges):
+        for j in range(6):
+            if not edge.tolerance[j].locked:
+                mask[6 * i + j] = True
+    return mask
+
+
+def _build_result(free_edges: list, s: float) -> dict[str, ToleranceSpec6]:
+    """Assign uniform bound=s to every free DoF; copy locked DoF unchanged."""
+    result: dict[str, ToleranceSpec6] = {}
+    for edge in free_edges:
+        specs = []
+        for j in range(6):
+            existing = edge.tolerance[j]
+            if existing.locked:
+                specs.append(copy.copy(existing))
+            else:
+                specs.append(ToleranceSpec(distribution="uniform", bound=s))
+        result[edge.name] = ToleranceSpec6(*specs)
+    return result
+
+
 class EqualAllocation(AllocationObjective):
-    """Uniform scale-factor allocation: every free edge gets the same bound.
+    """Worst-case (linear-sum) equal allocation.
 
-    For each active output DoF k, computes:
-        s_k = B_k / Σ_{free (i,j)} |J[k, 6*i+j]|
+    For each active output DoF k:
+        s_k = B_k / Σ_{free cols} |J[k, col]|
 
-    where the sum runs only over non-locked (edge, DoF) pairs. Uses the most
-    restrictive: s = min(s_k), ensuring every active constraint is satisfied
-    simultaneously at the linear-approximation level (Option A, locked 2026-06-26).
-
-    Non-locked DoF on free edges receive ToleranceSpec("uniform", bound=s).
-    Locked DoF on free edges are left unchanged.
+    s = min(s_k).  Assumes all sources contribute simultaneously in the same
+    direction — maximally conservative.  Appropriate when hard bounds must be
+    guaranteed regardless of error direction correlation.
     """
 
     def solve(
@@ -100,42 +124,51 @@ class EqualAllocation(AllocationObjective):
         target_tolerance: ToleranceSpec6,
         free_edges: list,
     ) -> dict[str, ToleranceSpec6]:
-        J = sensitivity_matrix  # (6, 6*N)
+        J = sensitivity_matrix
         N = len(free_edges)
+        free_mask = _build_free_mask(free_edges, N)
 
-        # Boolean mask over the 6*N columns: True = free (non-locked) DoF.
-        free_mask = np.zeros(6 * N, dtype=bool)
-        for i, edge in enumerate(free_edges):
-            for j in range(6):
-                if not edge.tolerance[j].locked:
-                    free_mask[6 * i + j] = True
-
-        # Per-output-DoF scale factors, restricted to free columns only.
         s_values: list[float] = []
         for k in range(6):
             row_sum = float(np.sum(np.abs(J[k, free_mask])))
             if row_sum > 0.0:
                 s_values.append(target_tolerance[k].bound / row_sum)
 
-        if not s_values:
-            # Degenerate: all free-column sensitivities are zero.
-            # Fall back to the smallest target bound as a safe conservative default.
-            s = float(min(target_tolerance[k].bound for k in range(6)))
-        else:
-            s = min(s_values)
+        s = min(s_values) if s_values else float(min(target_tolerance[k].bound for k in range(6)))
+        return _build_result(free_edges, s)
 
-        # Build the proposed ToleranceSpec6 for each free edge.
-        result: dict[str, ToleranceSpec6] = {}
-        for edge in free_edges:
-            specs = []
-            for j in range(6):
-                existing = edge.tolerance[j]
-                if existing.locked:
-                    specs.append(copy.copy(existing))
-                else:
-                    specs.append(ToleranceSpec(distribution="uniform", bound=s))
-            result[edge.name] = ToleranceSpec6(*specs)
-        return result
+
+class RSSAllocation(AllocationObjective):
+    """Statistical (RSS) equal allocation.
+
+    For each active output DoF k:
+        s_k = B_k / sqrt(Σ_{free cols} J[k, col]²)
+
+    s = min(s_k).  Assumes sources are statistically independent — correct for
+    manufacturing processes where errors are uncorrelated.  Gives bounds
+    sqrt(N_free) times less conservative than EqualAllocation when N free DoF
+    contribute equally, where N_free is the number of active free columns.
+    """
+
+    def solve(
+        self,
+        sensitivity_matrix: np.ndarray,
+        target_tolerance: ToleranceSpec6,
+        free_edges: list,
+    ) -> dict[str, ToleranceSpec6]:
+        J = sensitivity_matrix
+        N = len(free_edges)
+        free_mask = _build_free_mask(free_edges, N)
+
+        s_values: list[float] = []
+        for k in range(6):
+            rss = float(np.sqrt(np.sum(J[k, free_mask] ** 2)))
+            if rss > 0.0:
+                s_values.append(target_tolerance[k].bound / rss)
+
+        s = min(s_values) if s_values else float(min(target_tolerance[k].bound for k in range(6)))
+        return _build_result(free_edges, s)
+
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -182,6 +215,102 @@ def _damp_angular(
                 )
         result[edge_name] = ToleranceSpec6(*specs)
     return result
+
+
+def _scale_angular(
+    allocation: dict[str, ToleranceSpec6], factor: float
+) -> dict[str, ToleranceSpec6]:
+    """Return a copy of allocation with every free angular bound multiplied by factor."""
+    result: dict[str, ToleranceSpec6] = {}
+    for edge_name, tol6 in allocation.items():
+        specs = [tol6[j] for j in range(6)]
+        for j in _ANGULAR_INDICES:
+            spec = specs[j]
+            if not spec.locked:
+                specs[j] = ToleranceSpec(
+                    distribution=spec.distribution,
+                    bound=spec.bound * factor,
+                    sigma_level=spec.sigma_level,
+                    locked=False,
+                )
+        result[edge_name] = ToleranceSpec6(*specs)
+    return result
+
+
+def _bisect_angular(
+    frame_graph,
+    lo: dict[str, ToleranceSpec6],   # passing allocation (tighter)
+    hi: dict[str, ToleranceSpec6],   # failing allocation (looser)
+    frame_a: str,
+    frame_b: str,
+    target_tolerance,
+    n_validate: int,
+    seed: int,
+    tol: float = 0.005,  # stop when hi/lo angular ratio < 0.5%
+) -> tuple[dict[str, ToleranceSpec6], "ValidationReport"]:
+    """Binary search between lo (passing) and hi (failing) on the angular scale factor.
+
+    Recovers the slack introduced by the fixed gamma step in the damping loop.
+    Returns the loosest allocation that still passes MC validation.
+    """
+    # Extract angular scale from any free angular DoF on any edge (all equal).
+    lo_scale = hi_scale = 1.0
+    for tol6 in lo.values():
+        for j in _ANGULAR_INDICES:
+            if not tol6[j].locked and tol6[j].bound > 0:
+                lo_scale = tol6[j].bound
+                break
+        else:
+            continue
+        break
+    for tol6 in hi.values():
+        for j in _ANGULAR_INDICES:
+            if not tol6[j].locked and tol6[j].bound > 0:
+                hi_scale = tol6[j].bound
+                break
+        else:
+            continue
+        break
+
+    best = lo
+    best_report = None
+
+    while (hi_scale - lo_scale) / max(hi_scale, 1e-12) > tol:
+        mid_scale = (lo_scale + hi_scale) / 2.0
+        ratio = mid_scale / lo_scale
+        mid = _scale_angular(lo, ratio)
+        report = _mc_validate(
+            frame_graph, mid, frame_a, frame_b, target_tolerance, n_validate, seed
+        )
+        if report.passed:
+            best = mid
+            best_report = report
+            lo_scale = mid_scale
+        else:
+            hi_scale = mid_scale
+
+    if best_report is None:
+        best_report = _mc_validate(frame_graph, best, frame_a, frame_b, target_tolerance, n_validate, seed)
+
+    return best, best_report
+
+
+def _mc_validate(
+    frame_graph, allocation, frame_a, frame_b, target_tolerance, n_validate, seed
+) -> "ValidationReport":
+    fg_copy = _copy_frame_graph_with_tolerances(frame_graph, allocation)
+    trial_data = MonteCarloFKEngine.run(fg_copy, n_validate, seed)
+    achieved = point_pair_envelope_box(trial_data, fg_copy, frame_a, frame_b)
+    per_dof_pass = {
+        label: max(abs(achieved[label]["min"]), abs(achieved[label]["max"]))
+               <= target_tolerance[k].bound
+        for k, label in enumerate(DOF_LABELS)
+    }
+    return ValidationReport(
+        achieved_envelope=achieved,
+        passed=all(per_dof_pass.values()),
+        per_dof_pass=per_dof_pass,
+    )
 
 
 # ── AllocationEngine ──────────────────────────────────────────────────────────
@@ -249,21 +378,9 @@ class AllocationEngine:
         Builds a copy of frame_graph with proposed_tolerances applied, runs
         MonteCarloFKEngine, and compares the achieved envelope to target_tolerance.
         """
-        fg_copy = _copy_frame_graph_with_tolerances(frame_graph, proposed_tolerances)
-        trial_data = MonteCarloFKEngine.run(fg_copy, n_trials, seed)
-        achieved = point_pair_envelope_box(trial_data, fg_copy, frame_a, frame_b)
-
-        per_dof_pass: dict[str, bool] = {}
-        for k, label in enumerate(DOF_LABELS):
-            half_width = max(
-                abs(achieved[label]["min"]), abs(achieved[label]["max"])
-            )
-            per_dof_pass[label] = half_width <= target_tolerance[k].bound
-
-        return ValidationReport(
-            achieved_envelope=achieved,
-            passed=all(per_dof_pass.values()),
-            per_dof_pass=per_dof_pass,
+        return _mc_validate(
+            frame_graph, proposed_tolerances, frame_a, frame_b,
+            target_tolerance, n_trials, seed,
         )
 
     @staticmethod
@@ -296,6 +413,7 @@ class AllocationEngine:
         """
         if objective is None:
             objective = EqualAllocation()
+        method_name = type(objective).__name__
 
         baseline = AllocationEngine.solve(
             frame_graph, frame_a, frame_b, target_tolerance, objective
@@ -311,15 +429,25 @@ class AllocationEngine:
                 iterations_used=0,
                 status_message="",
                 final_validation_report=report,
+                target_tolerance=target_tolerance,
+                method=method_name,
             )
 
         current = copy.deepcopy(baseline)
+        prev = baseline  # last failing allocation (tighter is safer to start)
         for iteration in range(max_iter):
+            prev = current
             current = _damp_angular(current, gamma)
             report = AllocationEngine.validate(
                 frame_graph, current, frame_a, frame_b, target_tolerance, n_validate, seed
             )
             if report.passed:
+                # Binary-search between current (passing) and prev (failing) to
+                # recover the slack introduced by the fixed gamma step size.
+                current, report = _bisect_angular(
+                    frame_graph, current, prev, frame_a, frame_b,
+                    target_tolerance, n_validate, seed,
+                )
                 return AllocationResult(
                     baseline_linear_allocation=baseline,
                     corrected_allocation=current,
@@ -327,6 +455,8 @@ class AllocationEngine:
                     iterations_used=iteration + 1,
                     status_message="",
                     final_validation_report=report,
+                    target_tolerance=target_tolerance,
+                    method=method_name,
                 )
 
         return AllocationResult(
@@ -336,4 +466,6 @@ class AllocationEngine:
             iterations_used=max_iter,
             status_message="Allocation could not converge to target budget",
             final_validation_report=report,
+            target_tolerance=target_tolerance,
+            method=method_name,
         )

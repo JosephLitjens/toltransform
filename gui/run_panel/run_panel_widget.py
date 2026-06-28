@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from persistence.schema import ProjectModel, project_model_to_frame_graph
-from sim.allocation import AllocationEngine, AllocationResult
+from sim.allocation import AllocationEngine, AllocationResult, EqualAllocation, RSSAllocation
 from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData
 
 _DOF_NAMES = ("dx", "dy", "dz", "rx", "ry", "rz")
@@ -59,6 +59,8 @@ class _RunWorker(QThread):
         frame_a: str = "",
         frame_b: str = "",
         target_tol: ToleranceSpec6 | None = None,
+        objective=None,
+        max_iter: int = 30,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -69,6 +71,8 @@ class _RunWorker(QThread):
         self._frame_a = frame_a
         self._frame_b = frame_b
         self._target_tol = target_tol
+        self._objective = objective
+        self._max_iter = max_iter
 
     def run(self) -> None:
         try:
@@ -82,8 +86,10 @@ class _RunWorker(QThread):
                     self._frame_a,
                     self._frame_b,
                     self._target_tol,
+                    objective=self._objective,
                     seed=self._seed,
                     n_validate=1000,
+                    max_iter=self._max_iter,
                 )
             self.finished.emit(result)
         except Exception as exc:
@@ -207,6 +213,26 @@ class RunPanelWidget(QWidget):
         frame_row.addWidget(self._frame_b_combo, stretch=1)
         layout.addLayout(frame_row)
 
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Method:"))
+        self._method_combo = QComboBox()
+        self._method_combo.addItem("Statistical (RSS)", "rss")
+        self._method_combo.addItem("Worst-Case (Linear Sum)", "wc")
+        method_row.addWidget(self._method_combo, stretch=1)
+        layout.addLayout(method_row)
+
+        iter_row = QHBoxLayout()
+        iter_row.addWidget(QLabel("Max iterations:"))
+        self._max_iter_spin = QSpinBox()
+        self._max_iter_spin.setRange(1, 500)
+        self._max_iter_spin.setValue(30)
+        self._max_iter_spin.setToolTip(
+            "Maximum angular damping iterations. Increase if the solver reports "
+            "non-convergence but the achieved envelope is close to the target."
+        )
+        iter_row.addWidget(self._max_iter_spin, stretch=1)
+        layout.addLayout(iter_row)
+
         # Target bound table
         grid = QGridLayout()
         grid.addWidget(QLabel("<b>DoF</b>"), 0, 0, Qt.AlignmentFlag.AlignCenter)
@@ -324,9 +350,13 @@ class RunPanelWidget(QWidget):
                 self._set_status("Error: Frame A and Frame B must be different", error=True)
                 return
             target_tol = self._get_target_tol()
+            max_iter = self._max_iter_spin.value()
+            objective = RSSAllocation() if self._method_combo.currentData() == "rss" else EqualAllocation()
         else:
             frame_a = frame_b = ""
             target_tol = None
+            objective = None
+            max_iter = 30
 
         try:
             frame_graph = project_model_to_frame_graph(self._project)
@@ -346,6 +376,8 @@ class RunPanelWidget(QWidget):
             frame_a=frame_a,
             frame_b=frame_b,
             target_tol=target_tol,
+            objective=objective,
+            max_iter=max_iter,
             parent=self,
         )
         self._worker.finished.connect(self._on_run_finished)

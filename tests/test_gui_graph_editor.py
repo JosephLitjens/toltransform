@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox
 
 from gui.graph_editor.add_edge_dialog import AddEdgeDialog
 from gui.graph_editor.add_frame_dialog import AddFrameDialog
+from gui.graph_editor.edit_edge_dialog import EditEdgeDialog
 from gui.graph_editor.frame_edge_tree import FrameEdgeTree
 from gui.graph_editor.htm_entry_widget import HTMEntryWidget
 from gui.main_window import MainWindow, _empty_project
@@ -275,3 +276,59 @@ def test_frame_edge_tree_selected_item_info_edge(qtbot):
     name, kind = info
     assert name == "e1"
     assert kind == "edge"
+
+
+# ── EditEdgeDialog tests ──────────────────────────────────────────────────────
+
+def test_edit_edge_dialog_prepopulates_name_and_htm(qtbot):
+    project = make_project("A", "B")
+    edge = _make_edge("my_edge", "A", "B")
+    edge.nominal = HTMInputXyzEuler(kind="xyz_euler", xyz=[1.0, 2.0, 3.0], euler_angles=[0.0, 0.0, 0.0])
+    project.edges.append(edge)
+
+    dlg = EditEdgeDialog(edge, project)
+    qtbot.addWidget(dlg)
+
+    assert dlg._name_edit.text() == "my_edge"
+    # HTMEntryWidget should show the xyz values — verify the widget is pre-loaded (valid)
+    assert dlg._htm_entry.is_valid()
+
+
+def test_edit_edge_accept_updates_edge_in_project(qtbot):
+    project = make_project("A", "B")
+    edge = _make_edge("old_name", "A", "B")
+    project.edges.append(edge)
+
+    widget = __import__("gui.graph_editor.graph_editor_widget",
+                        fromlist=["GraphEditorWidget"]).GraphEditorWidget()
+    qtbot.addWidget(widget)
+    widget.set_project(project)
+
+    # Select the edge in the tree
+    widget._tree.setCurrentItem(widget._tree._edges_root.child(0))
+
+    # Open dialog, change name, accept
+    dlg = EditEdgeDialog(edge, project)
+    qtbot.addWidget(dlg)
+    dlg._name_edit.setText("new_name")
+    dlg._on_accept()
+
+    assert dlg._result is not None
+    assert dlg._result.name == "new_name"
+    assert dlg._result.parent == "A"
+    assert dlg._result.child == "B"
+
+
+def test_edit_edge_cancel_leaves_project_unchanged(qtbot):
+    project = make_project("A", "B")
+    edge = _make_edge("original", "A", "B")
+    project.edges.append(edge)
+
+    dlg = EditEdgeDialog(edge, project)
+    qtbot.addWidget(dlg)
+    dlg._name_edit.setText("changed")
+    dlg.reject()   # Cancel
+
+    # Project edge list is unchanged (reject doesn't call _on_accept)
+    assert project.edges[0].name == "original"
+    assert dlg._result is None

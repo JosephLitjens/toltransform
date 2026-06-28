@@ -230,3 +230,5 @@ def test_allocation_result_preserves_both_allocations():
                     f"{edge_name} DoF {j}: baseline ({b_tol[j].bound:.6f}) "
                     f"must exceed corrected ({c_tol[j].bound:.6f})"
                 )
+
+

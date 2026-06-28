@@ -7,3 +7,5 @@ matplotlib
 pytest
 PySide6
 pytest-qt
+pyqtgraph
+PyOpenGL
