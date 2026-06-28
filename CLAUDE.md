@@ -60,9 +60,21 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** C (GUI) — **ALL TASKS COMPLETE ✅** (C-1 through C-7).
-- **Last completed task:** C-6 + C-7 — integration tests + window/dock persistence + Recent Files. Suite: **302 passed, 0 skipped**.
-- **Next task:** None — Milestone C is complete. See Section 7.5 (deferred/out-of-scope) for post-v1.0 ideas.
+- **Current milestone:** D — **ALL TASKS COMPLETE ✅** (D-1: 3D frame viewer, D-2: edit edge dialog, plus IK allocation enhancements). All merged to `main` and pushed.
+- **Last completed task:** IK allocation enhancements (RSSAllocation, binary-search refinement, max_iter spinbox, Target ± column) + docs update + merge to main. Suite: **311 passed**.
+- **Next task:** None — all planned milestones complete. See `docs/design_spec.md` Section 7.6 for deferred/future ideas.
+
+**✅ D-2 complete:** `gui/graph_editor/edit_edge_dialog.py` — `EditEdgeDialog(QDialog)` pre-populated via `HTMEntryWidget.set_htm_input_model(edge.nominal)`; parent/child shown as read-only labels; duplicate-name check excludes original name; triggered by double-click on edge row OR "Edit Selected" button in `GraphEditorWidget`; replaces `project.edges[idx]` in-place + emits `project_changed`. 3 new tests.
+
+**✅ D-1 complete:** `gui/frame_viewer/frame_viewer_window.py` — `FrameViewerWindow(QWidget, Qt.Window)` with pyqtgraph `GLViewWidget`; two modes: Frames (per-frame RGB coordinate triads via `GLLinePlotItem`) and Point Cloud (`GLScatterPlotItem` from MC trial data, viridis depth colormap). `_compute_world_transforms(project)` is Section 5.3-compliant (schema types + numpy only, no core objects). Opened via `View → 3D Frame Viewer` (Ctrl+3); live-updates on graph changes and after each run. 4 unit tests (no headless OpenGL rendering tests).
+
+**✅ IK allocation enhancements complete (merged to main 2026-06-28):**
+- `RSSAllocation` class added to `sim/allocation.py` — statistical RSS, sqrt(N) less conservative than `EqualAllocation`; now the default in GUI.
+- `_bisect_angular()` binary-search refinement — recovers ~10% slack from fixed gamma=0.9 step after damping loop converges.
+- `AllocationResult` gains `target_tolerance` and `method` fields.
+- Run panel: Method combo (Statistical RSS / Worst-Case) + Max iterations spinbox (default 30, range 1–500).
+- Results viewer: Target ± column in achieved table; method label in convergence status.
+- SplitAllocation explored and removed (damping loop can only tighten angular DoF; combined RSS of ang+trans could still exceed budget).
 
 **✅ C-7 complete:** `gui/main_window.py` — `QSettings("TolTransform", "TolTransform")` saves/restores window geometry, dock layout, and Recent Files list (capped at 5) between sessions. `closeEvent()` saves settings before accepting; `_restore_settings()` called after `_setup_ui()`. Recent Files submenu under `File > Open Recent` with per-entry `_open_recent()` (handles missing file gracefully), `_add_recent()` (prepend+dedup+cap), `_remove_recent()`, `_clear_recent_files()`. `_save_project_as()` also calls `_add_recent()`.
 
