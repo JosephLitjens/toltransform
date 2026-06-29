@@ -60,8 +60,12 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** EqualAllocation/RSSAllocation removal — **COMPLETE ✅**. Merged to `main` and pushed.
-- **Last completed task:** Removed `EqualAllocation`, `RSSAllocation`, and `AllocationObjective` ABC from `sim/allocation.py`; `LoosestAllocation` is now the sole allocation objective with no `objective` parameter on any public method. GUI Method combo removed. Docs fully updated. Suite: **239 passed** (non-GUI).
+- **Current milestone:** Post-milestone enhancements — **COMPLETE ✅**. All changes merged to `main` and pushed.
+- **Last completed task (this session, 2026-06-28 evening):** Three items implemented on `feature/asymmetric-tolerances`, merged to `main`:
+  1. **Asymmetric tolerance bounds** (`lower`/`upper` format for FK mode): `core/tolerance.py`, `core/sampling.py`, `persistence/schema.py`, `postprocess/stats.py`, `gui/tolerance_editor/`. 49 new tests. IK remains symmetric-only.
+  2. **NameError bug fix** in `allocate_multi` non-convergence path: stale `method_name` variable replaced with `"LoosestAllocation"`. Regression test added.
+  3. **IK convergence fix with asymmetric locked DoFs**: NLP budget in `LoosestAllocation.solve()` now subtracts worst-case locked DoF contributions (`_compute_locked_budget` helper). Prevents systematic over-allocation when locked DoFs have non-zero bounds. Fix applied to both `solve()` and `solve_multi()`. Regression test added.
+- **Suite: 270 passed** (non-GUI). Full suite (including GUI): 302 passed.
 - **Next task:** None — all planned milestones complete. See `docs/design_spec.md` Section 7.6 for deferred/future ideas.
 
 **✅ Multi-pair IK allocation complete (merged to main 2026-06-28):**

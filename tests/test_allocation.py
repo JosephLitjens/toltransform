@@ -569,3 +569,104 @@ def test_allocate_multi_lever_arm_two_pairs():
             f"{[k for k, v in vr.per_dof_pass.items() if not v]}"
         )
 
+
+
+def test_ik_convergence_with_asymmetric_locked_dofs():
+    """Regression: IK allocation must converge when locked DoFs have asymmetric specs.
+
+    Previously the NLP budget was the full target bound, ignoring the contribution
+    of locked DoFs with non-zero bounds.  For asymmetric locked specs the mean shift
+    biases the MC output envelope, causing validation to fail by a margin that the
+    damping loop (which only damps FREE angular DoFs) cannot recover.
+
+    Fix: _compute_locked_budget() subtracts the worst-case locked contribution from
+    the NLP budget before solving, so free DoFs are only allocated the remaining slack.
+
+    Geometry: two-edge chain.
+      e0: dx locked (asymmetric: lower=-0.002, upper=0.006 → spec.bound=0.006, mean=0.002)
+          all other DoF locked at 0.
+      e1: dx FREE (to be allocated), all other DoF locked at 0.
+    Identity Jacobian → J[dx, dx] = 1 for both edges.
+
+    Expected: solve() allocates e1.dx = target_dx - 0.006 = 0.004 (not 0.010).
+    Without the fix: e1.dx = 0.010, MC sees 0.016 worst-case → fails to converge.
+    """
+    fg = FrameGraph()
+    for name in ("f0", "f1", "f2"):
+        fg.add_frame(name)
+
+    # e0: dx locked with asymmetric spec (spec.bound=0.006); all others locked at 0
+    locked_zero = _spec(0.0, locked=True)
+    e0_tol = ToleranceSpec6(
+        ToleranceSpec("uniform", lower=-0.002, upper=0.006, locked=True),
+        locked_zero, locked_zero, locked_zero, locked_zero, locked_zero,
+    )
+    fg.add_edge("f0", "f1", HTM.from_xyz_euler([0, 0, 0], [0, 0, 0]), e0_tol, name="e0")
+
+    # e1: dx FREE; all others locked at 0
+    e1_tol = ToleranceSpec6(
+        _spec(0.1),  # dx free — allocation will set this
+        locked_zero, locked_zero, locked_zero, locked_zero, locked_zero,
+    )
+    fg.add_edge("f1", "f2", HTM.from_xyz_euler([0, 0, 0], [0, 0, 0]), e1_tol, name="e1")
+
+    target_dx = 0.010
+    target = ToleranceSpec6(
+        _spec(target_dx),                  # dx target = ±0.010
+        _spec(0.0), _spec(0.0),            # dy, dz unconstrained
+        _spec(0.0), _spec(0.0), _spec(0.0),  # angular unconstrained
+    )
+
+    # Linear allocation: e1.dx must equal target - locked_contribution = 0.010 - 0.006 = 0.004
+    alloc = AllocationEngine.solve(fg, "f0", "f2", target)
+    assert alloc["e1"].dx.bound == pytest.approx(0.004, abs=1e-4), (
+        f"e1.dx should be ≈0.004 (target 0.010 minus locked contribution 0.006), "
+        f"got {alloc['e1'].dx.bound:.6f}"
+    )
+
+    # Full allocate() must converge (MC validation must pass)
+    result = AllocationEngine.allocate(
+        fg, "f0", "f2", target,
+        n_validate=2000, gamma=0.9, max_iter=10, seed=42,
+    )
+    assert result.converged, (
+        f"allocate() must converge with asymmetric locked dx; got: {result.status_message}"
+    )
+    assert result.final_validation_report.passed, (
+        f"Final MC validation must pass; failing DoFs: "
+        f"{[k for k, v in result.final_validation_report.per_dof_pass.items() if not v]}"
+    )
+
+
+def test_allocate_multi_non_convergence_returns_method_field():
+    """Regression: allocate_multi non-convergence path must not raise NameError.
+
+    Previously the non-convergence return used the undefined variable `method_name`
+    instead of the hardcoded string "LoosestAllocation", causing a NameError
+    whenever allocate_multi ran out of iterations.
+    """
+    fg = FrameGraph()
+    for f in ("base", "pivot", "arm"):
+        fg.add_frame(f)
+
+    # Same lever-arm geometry, but with an absurdly tight target that can never
+    # converge in max_iter=2 iterations — forces the non-convergence branch.
+    pivot_tol = ToleranceSpec6(
+        _spec(0.0, locked=True), _spec(0.0, locked=True), _spec(0.0, locked=True),
+        _spec(0.0, locked=True), _spec(0.0, locked=True), _spec(0.01),
+    )
+    arm_nom = HTM.from_xyz_euler([1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    fg.add_edge("base", "pivot", _identity(), pivot_tol, "pivot_edge")
+    fg.add_edge("pivot", "arm",  arm_nom,     _locked_tol6(), "arm_edge")
+
+    # Target dy = 0.00001 is impossibly tight — forces non-convergence.
+    tight_target = _lever_target(b_trans=0.00001, b_rx=0.20, b_rz=0.10)
+    result = AllocationEngine.allocate_multi(
+        fg, [("base", "arm", tight_target)],
+        n_validate=100, gamma=0.9, max_iter=2, seed=42,
+    )
+
+    assert not result.converged
+    assert result.status_message == "Allocation could not converge to target budget"
+    assert result.method == "LoosestAllocation"   # was NameError before the fix
+    assert result.iterations_used == 2

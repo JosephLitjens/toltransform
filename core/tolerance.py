@@ -30,23 +30,42 @@ from core.transforms import HTM
 class ToleranceSpec:
     """Tolerance specification for one degree of freedom.
 
+    Two mutually exclusive modes:
+
+    Symmetric (default):
+        Set ``bound`` only. Samples from [-bound, +bound] (uniform) or
+        N(0, bound/sigma_level) (normal).
+
+    Asymmetric:
+        Set ``lower`` and ``upper`` together (``bound`` is then auto-derived
+        as max(|lower|, |upper|) for IK compatibility — do not pass both
+        explicitly). Samples from [lower, upper] (uniform) or
+        N((lower+upper)/2, (upper-lower)/(2·sigma_level)) (normal).
+
     Parameters
     ----------
     distribution : "uniform" or "normal"
     bound : float
-        For "uniform": half-width of the distribution (samples in [-bound, +bound]).
-        For "normal": the stated tolerance = sigma_level * sigma, so sigma = bound/sigma_level.
+        Symmetric half-width (>= 0). Used when lower/upper are None.
+        Auto-computed as max(|lower|, |upper|) in asymmetric mode so that
+        the allocation engine can read a conservative symmetric bound.
     sigma_level : float
         Default 3.0. Only meaningful when distribution="normal".
     locked : bool
         Default False. When True, this DoF is excluded from inverse allocation's
         free-variable set. Has NO effect on sampling — see module docstring.
+    lower : float | None
+        Lower bound for asymmetric mode. Must be set together with ``upper``.
+    upper : float | None
+        Upper bound for asymmetric mode. Must satisfy upper > lower.
     """
 
     distribution: Literal["uniform", "normal"]
-    bound: float
+    bound: float = 0.0
     sigma_level: float = 3.0
     locked: bool = False
+    lower: float | None = None
+    upper: float | None = None
 
     def __post_init__(self) -> None:
         if self.distribution not in ("uniform", "normal"):
@@ -54,13 +73,76 @@ class ToleranceSpec:
                 f"ToleranceSpec distribution must be 'uniform' or 'normal'; "
                 f"got '{self.distribution}'."
             )
-        if self.bound < 0:
+
+        has_lower = self.lower is not None
+        has_upper = self.upper is not None
+
+        if has_lower != has_upper:
             raise ValueError(
-                f"ToleranceSpec bound must be >= 0; got {self.bound}."
+                "ToleranceSpec: lower and upper must be set together; "
+                "got only one of the two."
             )
+
+        if has_lower and has_upper:
+            # Asymmetric mode
+            if self.lower >= self.upper:  # type: ignore[operator]
+                raise ValueError(
+                    f"ToleranceSpec: lower ({self.lower}) must be < upper ({self.upper})."
+                )
+            # Derive a conservative symmetric bound for IK compatibility.
+            self.bound = max(abs(self.lower), abs(self.upper))  # type: ignore[arg-type]
+        else:
+            # Symmetric mode
+            if self.bound < 0:
+                raise ValueError(
+                    f"ToleranceSpec bound must be >= 0; got {self.bound}."
+                )
+
+    @property
+    def is_asymmetric(self) -> bool:
+        """True when lower/upper are set (asymmetric mode)."""
+        return self.lower is not None and self.upper is not None
+
+    @property
+    def variance(self) -> float:
+        """True second moment about zero for use in sensitivity/Pareto calculations.
+
+        Symmetric uniform:   E[X²] = bound²/3
+        Asymmetric uniform:  E[X²] = Var[X] + E[X]²
+                             Var[X] = (upper-lower)²/12,  E[X] = (lower+upper)/2
+        Symmetric normal:    E[X²] = Var[X] = (bound/sigma_level)²
+        Asymmetric normal:   E[X²] = Var[X] + E[X]²
+                             Var[X] = ((upper-lower)/(2·sigma_level))²
+                             E[X]   = (lower+upper)/2
+        """
+        if self.is_asymmetric:
+            lo, hi = self.lower, self.upper  # type: ignore[assignment]
+            mean = (lo + hi) / 2.0
+            half_width = (hi - lo) / 2.0
+            if self.distribution == "uniform":
+                var = (hi - lo) ** 2 / 12.0
+            else:
+                sigma = half_width / self.sigma_level
+                var = sigma ** 2
+            return var + mean ** 2
+        else:
+            if self.distribution == "uniform":
+                return self.bound ** 2 / 3.0
+            else:
+                sigma = self.bound / self.sigma_level
+                return sigma ** 2
 
     def sample(self, n_trials: int, rng: np.random.Generator) -> np.ndarray:
         """Draw n_trials samples. Always samples regardless of locked flag."""
+        if self.is_asymmetric:
+            return _sampling.sample_asymmetric(
+                self.distribution,
+                self.lower,  # type: ignore[arg-type]
+                self.upper,  # type: ignore[arg-type]
+                self.sigma_level,
+                n_trials,
+                rng,
+            )
         return _sampling.sample(
             self.distribution, self.bound, self.sigma_level, n_trials, rng
         )

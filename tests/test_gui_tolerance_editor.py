@@ -231,3 +231,139 @@ def test_tolerance_editor_set_project_clears_selection(qtbot):
     widget.set_project(_empty_project())
     assert widget._stack.currentIndex() == 0
     assert widget._selected_edge_name is None
+
+
+# ── Asymmetric tolerance mode toggle ─────────────────────────────────────────
+
+def _asym_tol6(lo: float, hi: float, dist: str = "uniform") -> ToleranceSpec6Model:
+    """Build a ToleranceSpec6Model where all 6 DoF are asymmetric lo..hi."""
+    s = ToleranceSpecModel(
+        distribution=dist,
+        bound=max(abs(lo), abs(hi)),
+        lower=lo,
+        upper=hi,
+    )
+    return ToleranceSpec6Model(dx=s, dy=s, dz=s, rx=s, ry=s, rz=s)
+
+
+def test_toggle_to_asymmetric_mode_shows_lower_upper(qtbot):
+    """Clicking mode button switches _bound_stack to page 1 (lower/upper widgets)."""
+    project = _project_with_edge()
+    widget = ToleranceEditorWidget()
+    qtbot.addWidget(widget)
+    widget.set_project(project)
+
+    row = widget._rows[0]
+    assert not row.is_asymmetric
+    assert row._bound_stack.currentIndex() == 0
+
+    row.mode_btn.click()  # toggle to asymmetric
+
+    assert row.is_asymmetric
+    assert row._bound_stack.currentIndex() == 1
+    assert row.mode_btn.text() == "↔"
+
+
+def test_toggle_to_asymmetric_pre_populates_lower_upper(qtbot):
+    """When switching to asymmetric mode, lower/upper are pre-filled as ±bound."""
+    bound = 0.005
+    project = _project_with_edge(tol=_make_tol6(bound))
+    widget = ToleranceEditorWidget()
+    qtbot.addWidget(widget)
+    widget.set_project(project)
+
+    row = widget._rows[0]
+    row.mode_btn.click()  # switch to asymmetric
+
+    import pytest
+    assert row.lower_spin.value() == pytest.approx(-bound)
+    assert row.upper_spin.value() == pytest.approx(bound)
+
+
+def test_toggle_back_to_symmetric_updates_bound(qtbot):
+    """Switching back from asymmetric sets bound = max(|lower|, |upper|)."""
+    project = _project_with_edge()
+    widget = ToleranceEditorWidget()
+    qtbot.addWidget(widget)
+    widget.set_project(project)
+
+    row = widget._rows[0]
+    row.mode_btn.click()           # → asymmetric
+    row.lower_spin.setValue(-0.003)
+    row.upper_spin.setValue(0.008)
+    row.mode_btn.click()           # → symmetric
+
+    import pytest
+    assert not row.is_asymmetric
+    assert row._bound_stack.currentIndex() == 0
+    assert row.bound_spin.value() == pytest.approx(0.008)  # max(0.003, 0.008)
+    assert row.mode_btn.text() == "±"
+
+
+def test_load_asymmetric_spec_enters_asymmetric_mode(qtbot):
+    """Loading a ToleranceSpec6Model with lower/upper sets the row to ↔ mode."""
+    lo, hi = -0.002, 0.006
+    project = _project_with_edge(tol=_asym_tol6(lo, hi))
+    widget = ToleranceEditorWidget()
+    qtbot.addWidget(widget)
+    widget.set_project(project)
+
+    row = widget._rows[0]
+    assert row.is_asymmetric
+    assert row._bound_stack.currentIndex() == 1
+
+    import pytest
+    assert row.lower_spin.value() == pytest.approx(lo)
+    assert row.upper_spin.value() == pytest.approx(hi)
+
+
+def test_get_model_returns_asymmetric_spec(qtbot):
+    """get_model() in asymmetric mode returns model with lower/upper set."""
+    lo, hi = -0.001, 0.004
+    project = _project_with_edge(tol=_asym_tol6(lo, hi))
+    widget = ToleranceEditorWidget()
+    qtbot.addWidget(widget)
+    widget.set_project(project)
+
+    row = widget._rows[0]
+    model = row.get_model()
+
+    import pytest
+    assert model.lower == pytest.approx(lo)
+    assert model.upper == pytest.approx(hi)
+    assert model.bound == pytest.approx(max(abs(lo), abs(hi)))
+
+
+def test_asymmetric_field_change_writes_back_to_project(qtbot):
+    """Changing lower/upper spinboxes in asymmetric mode updates the ProjectModel."""
+    lo, hi = -0.002, 0.005
+    project = _project_with_edge(tol=_asym_tol6(lo, hi))
+    widget = ToleranceEditorWidget()
+    qtbot.addWidget(widget)
+    widget.set_project(project)
+
+    row = widget._rows[0]
+    new_hi = 0.009
+    row.upper_spin.setValue(new_hi)
+    # Trigger write-back (simulate valueChanged → _on_field_changed)
+    widget._on_field_changed()
+
+    import pytest
+    stored = project.edges[0].tolerance.dx
+    assert stored.upper == pytest.approx(new_hi)
+    assert stored.lower == pytest.approx(lo)
+
+
+def test_is_valid_returns_false_for_equal_lower_upper(qtbot):
+    """lower == upper is invalid — is_valid() should return False."""
+    project = _project_with_edge()
+    widget = ToleranceEditorWidget()
+    qtbot.addWidget(widget)
+    widget.set_project(project)
+
+    row = widget._rows[0]
+    row.mode_btn.click()  # → asymmetric
+    row.lower_spin.setValue(0.005)
+    row.upper_spin.setValue(0.005)
+
+    assert not row.is_valid()

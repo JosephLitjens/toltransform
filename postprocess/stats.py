@@ -320,11 +320,9 @@ def compute_tolerance_sensitivities(
     variance to the 6-DoF output at frame_b (relative to frame_a), then ranks
     edge/DoF pairs by their percentage of total output variance.
 
-    Variance formula (consistent with sim/allocation.py and Section 9.1.1):
-        uniform, bound=b  →  var = b²/3
-        normal,  bound=b, sigma_level=k  →  var = (b/k)²
-
-    Locked DoFs (bound=0) contribute zero variance — no special-casing needed.
+    Variance is computed via ToleranceSpec.variance, which handles both symmetric
+    (±bound) and asymmetric (lower/upper) specs correctly, including non-zero mean
+    contributions for off-centre intervals. Locked DoFs with bound=0 contribute zero.
 
     Raises DisjointFramesError (propagated from path_edges_between) if frame_a
     and frame_b are in different connected components.
@@ -350,10 +348,7 @@ def compute_tolerance_sensitivities(
     for i, edge in enumerate(edges):
         for j, label in enumerate(DOF_LABELS):
             spec = edge.tolerance[j]
-            if spec.distribution == "uniform":
-                var_j = (spec.bound ** 2) / 3.0
-            else:  # "normal"
-                var_j = (spec.bound / spec.sigma_level) ** 2
+            var_j = spec.variance
             J_col = J[:, i * 6 + j]                          # shape (6,)
             raw_contributions.append(
                 (edge.name, label, float(np.dot(J_col, J_col) * var_j))

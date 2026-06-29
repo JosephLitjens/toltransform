@@ -82,6 +82,67 @@ class TestToleranceSpecModel:
         with pytest.raises(ValidationError):
             ToleranceSpecModel(distribution="gaussian", bound=0.001)
 
+    def test_asymmetric_model_valid(self):
+        m = ToleranceSpecModel(distribution="uniform", bound=0.005,
+                               lower=-0.002, upper=0.005)
+        assert m.lower == pytest.approx(-0.002)
+        assert m.upper == pytest.approx(0.005)
+
+    def test_asymmetric_only_lower_raises(self):
+        with pytest.raises(ValidationError, match="lower and upper"):
+            ToleranceSpecModel(distribution="uniform", bound=0.0, lower=-0.001)
+
+    def test_asymmetric_lower_ge_upper_raises(self):
+        with pytest.raises(ValidationError):
+            ToleranceSpecModel(distribution="uniform", bound=0.001,
+                               lower=0.003, upper=0.001)
+
+    def _find_edge(self, fg: FrameGraph, name: str):
+        return next(e for e in fg.all_edges() if e.name == name)
+
+    def test_symmetric_round_trip_via_frame_graph(self):
+        spec = ToleranceSpec("uniform", bound=0.007, locked=True)
+        t6 = ToleranceSpec6(spec, spec, spec, spec, spec, spec)
+        fg = FrameGraph()
+        fg.add_frame("a"); fg.add_frame("b")
+        fg.add_edge("a", "b", HTM.from_matrix(np.eye(4)), t6, name="e0")
+        proj = frame_graph_to_project_model(fg, _make_sim_settings())
+        recovered = project_model_to_frame_graph(proj)
+        recovered_spec = self._find_edge(recovered, "e0").tolerance.dx
+        assert not recovered_spec.is_asymmetric
+        assert recovered_spec.bound == pytest.approx(0.007)
+        assert recovered_spec.locked is True
+
+    def test_asymmetric_round_trip_via_frame_graph(self):
+        lo, hi = -0.003, 0.008
+        spec = ToleranceSpec("uniform", lower=lo, upper=hi)
+        t6 = ToleranceSpec6(spec, spec, spec, spec, spec, spec)
+        fg = FrameGraph()
+        fg.add_frame("a"); fg.add_frame("b")
+        fg.add_edge("a", "b", HTM.from_matrix(np.eye(4)), t6, name="e0")
+        proj = frame_graph_to_project_model(fg, _make_sim_settings())
+        recovered = project_model_to_frame_graph(proj)
+        r = self._find_edge(recovered, "e0").tolerance.dx
+        assert r.is_asymmetric
+        assert r.lower == pytest.approx(lo)
+        assert r.upper == pytest.approx(hi)
+        assert r.bound == pytest.approx(max(abs(lo), abs(hi)))
+
+    def test_asymmetric_normal_round_trip_via_frame_graph(self):
+        lo, hi, k = -0.001, 0.004, 2.0
+        spec = ToleranceSpec("normal", lower=lo, upper=hi, sigma_level=k)
+        t6 = ToleranceSpec6(spec, spec, spec, spec, spec, spec)
+        fg = FrameGraph()
+        fg.add_frame("a"); fg.add_frame("b")
+        fg.add_edge("a", "b", HTM.from_matrix(np.eye(4)), t6, name="e0")
+        proj = frame_graph_to_project_model(fg, _make_sim_settings())
+        recovered = project_model_to_frame_graph(proj)
+        r = self._find_edge(recovered, "e0").tolerance.dx
+        assert r.is_asymmetric
+        assert r.lower == pytest.approx(lo)
+        assert r.upper == pytest.approx(hi)
+        assert r.sigma_level == pytest.approx(k)
+
 
 # ── TestProjectModelValidation ────────────────────────────────────────────────
 
