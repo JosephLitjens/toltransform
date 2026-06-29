@@ -272,11 +272,7 @@ class ResultsViewerWidget(QWidget):
     # ── IK display ─────────────────────────────────────────────────────────────
 
     def _show_ik(self, result: AllocationResult) -> None:
-        method_label = {
-            "RSSAllocation": "Statistical (RSS)",
-            "EqualAllocation": "Worst-Case",
-            "LoosestAllocation": "Loosest (LP)",
-        }.get(result.method, result.method)
+        method_label = "Loosest (LP)"
 
         if result.converged:
             if result.iterations_used == 0:

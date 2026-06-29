@@ -2,19 +2,14 @@
 Inverse tolerance allocation engine (Mode 2, Section 3.2).
 
 Builds on core/frame_graph.py's compute_sensitivity() — no Jacobian math
-is re-implemented here. The allocation objective is extensible via
-AllocationObjective; three implementations are provided:
-
-  EqualAllocation   — worst-case linear sum, single uniform scale factor
-  RSSAllocation     — statistical RSS, single uniform scale factor
-  LoosestAllocation — log-sum NLP per-DoF maximization; each DoF gets the
-                      loosest bound its sensitivity allows, with no zeros
+is re-implemented here.  The sole allocation objective is LoosestAllocation:
+a log-sum NLP that maximises each DoF's bound independently subject to the
+linear worst-case output-envelope constraints, guaranteeing no zeros.
 """
 
 from __future__ import annotations
 
 import copy
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import numpy as np
@@ -62,37 +57,6 @@ class AllocationResult:
     per_pair_targets: list[tuple[str, str, ToleranceSpec6]] | None = None
 
 
-# ── Allocation objective interface ────────────────────────────────────────────
-
-class AllocationObjective(ABC):
-    """Strategy interface for computing per-edge tolerances from a sensitivity matrix."""
-
-    @abstractmethod
-    def solve(
-        self,
-        sensitivity_matrix: np.ndarray,
-        target_tolerance: ToleranceSpec6,
-        free_edges: list,
-    ) -> dict[str, ToleranceSpec6]:
-        """Propose per-edge tolerances for the free edges.
-
-        Parameters
-        ----------
-        sensitivity_matrix : np.ndarray, shape (6, 6*N)
-            Adjoint-based Jacobian from compute_sensitivity(), one 6-column block
-            per free edge in free_edges order.
-        target_tolerance : ToleranceSpec6
-            Desired output-frame error envelope.
-        free_edges : list[HTMEdge]
-            The N free edges in the same order as sensitivity_matrix columns.
-
-        Returns
-        -------
-        dict[str, ToleranceSpec6]
-            Proposed tolerance keyed by edge name, covering every free edge.
-        """
-
-
 def _build_free_mask(free_edges: list, N: int) -> np.ndarray:
     """Boolean mask (6*N,): True where edge DoF is not locked."""
     mask = np.zeros(6 * N, dtype=bool)
@@ -123,72 +87,7 @@ def _build_result(free_edges: list, bounds: np.ndarray) -> dict[str, ToleranceSp
     return result
 
 
-class EqualAllocation(AllocationObjective):
-    """Worst-case (linear-sum) equal allocation.
-
-    For each active output DoF k:
-        s_k = B_k / Σ_{free cols} |J[k, col]|
-
-    s = min(s_k).  Assumes all sources contribute simultaneously in the same
-    direction — maximally conservative.  Appropriate when hard bounds must be
-    guaranteed regardless of error direction correlation.
-    """
-
-    def solve(
-        self,
-        sensitivity_matrix: np.ndarray,
-        target_tolerance: ToleranceSpec6,
-        free_edges: list,
-    ) -> dict[str, ToleranceSpec6]:
-        J = sensitivity_matrix
-        N = len(free_edges)
-        free_mask = _build_free_mask(free_edges, N)
-
-        s_values: list[float] = []
-        for k in range(6):
-            row_sum = float(np.sum(np.abs(J[k, free_mask])))
-            if row_sum > 0.0:
-                s_values.append(target_tolerance[k].bound / row_sum)
-
-        s = min(s_values) if s_values else float(min(target_tolerance[k].bound for k in range(6)))
-        bounds = np.full(6 * N, s)
-        return _build_result(free_edges, bounds)
-
-
-class RSSAllocation(AllocationObjective):
-    """Statistical (RSS) equal allocation.
-
-    For each active output DoF k:
-        s_k = B_k / sqrt(Σ_{free cols} J[k, col]²)
-
-    s = min(s_k).  Assumes sources are statistically independent — correct for
-    manufacturing processes where errors are uncorrelated.  Gives bounds
-    sqrt(N_free) times less conservative than EqualAllocation when N free DoF
-    contribute equally, where N_free is the number of active free columns.
-    """
-
-    def solve(
-        self,
-        sensitivity_matrix: np.ndarray,
-        target_tolerance: ToleranceSpec6,
-        free_edges: list,
-    ) -> dict[str, ToleranceSpec6]:
-        J = sensitivity_matrix
-        N = len(free_edges)
-        free_mask = _build_free_mask(free_edges, N)
-
-        s_values: list[float] = []
-        for k in range(6):
-            rss = float(np.sqrt(np.sum(J[k, free_mask] ** 2)))
-            if rss > 0.0:
-                s_values.append(target_tolerance[k].bound / rss)
-
-        s = min(s_values) if s_values else float(min(target_tolerance[k].bound for k in range(6)))
-        bounds = np.full(6 * N, s)
-        return _build_result(free_edges, bounds)
-
-
-class LoosestAllocation(AllocationObjective):
+class LoosestAllocation:
     """Log-sum (geometric-mean) loosest-possible worst-case allocation.
 
     Solves the convex NLP:
@@ -578,9 +477,8 @@ class AllocationEngine:
         frame_a: str,
         frame_b: str,
         target_tolerance: ToleranceSpec6,
-        objective: AllocationObjective | None = None,
     ) -> dict[str, ToleranceSpec6]:
-        """Closed-form linear allocation step.
+        """Closed-form linear allocation step (LoosestAllocation).
 
         Returns
         -------
@@ -592,9 +490,6 @@ class AllocationEngine:
         ValueError
             If the path has no free edges (all path edges are entirely locked).
         """
-        if objective is None:
-            objective = EqualAllocation()
-
         frame_graph.validate_dag()
         path = frame_graph.path_edges_between(frame_a, frame_b)
 
@@ -610,7 +505,7 @@ class AllocationEngine:
 
         free_edge_names = [e.name for e in free_edges]
         J = compute_sensitivity(frame_graph, frame_a, frame_b, free_edge_names)
-        return objective.solve(J, target_tolerance, free_edges)
+        return LoosestAllocation().solve(J, target_tolerance, free_edges)
 
     @staticmethod
     def validate(
@@ -638,7 +533,6 @@ class AllocationEngine:
         frame_a: str,
         frame_b: str,
         target_tolerance: ToleranceSpec6,
-        objective: AllocationObjective | None = None,
         n_validate: int = 1000,
         gamma: float = 0.9,
         max_iter: int = 10,
@@ -646,7 +540,7 @@ class AllocationEngine:
     ) -> AllocationResult:
         """Iterative inverse allocation with nonlinear damping/correction.
 
-        1. Computes the baseline linear allocation via solve().
+        1. Computes the baseline linear allocation via solve() (LoosestAllocation).
         2. Validates it with n_validate MC trials.
         3. If validation fails (e.g., angular-to-positional lever-arm coupling),
            applies damping factor gamma to angular DoF bounds and retries,
@@ -660,12 +554,8 @@ class AllocationEngine:
             If max_iter is reached without convergence, returns converged=False with
             status_message == "Allocation could not converge to target budget".
         """
-        if objective is None:
-            objective = LoosestAllocation()
-        method_name = type(objective).__name__
-
         baseline = AllocationEngine.solve(
-            frame_graph, frame_a, frame_b, target_tolerance, objective
+            frame_graph, frame_a, frame_b, target_tolerance
         )
         report = AllocationEngine.validate(
             frame_graph, baseline, frame_a, frame_b, target_tolerance, n_validate, seed
@@ -679,7 +569,7 @@ class AllocationEngine:
                 status_message="",
                 final_validation_report=report,
                 target_tolerance=target_tolerance,
-                method=method_name,
+                method="LoosestAllocation",
             )
 
         current = copy.deepcopy(baseline)
@@ -705,7 +595,7 @@ class AllocationEngine:
                     status_message="",
                     final_validation_report=report,
                     target_tolerance=target_tolerance,
-                    method=method_name,
+                    method="LoosestAllocation",
                 )
 
         return AllocationResult(
@@ -716,19 +606,19 @@ class AllocationEngine:
             status_message="Allocation could not converge to target budget",
             final_validation_report=report,
             target_tolerance=target_tolerance,
-            method=method_name,
+            method="LoosestAllocation",
         )
 
     @staticmethod
     def solve_multi(
         frame_graph: FrameGraph,
         targets: list[tuple[str, str, ToleranceSpec6]],
-        objective: AllocationObjective | None = None,
     ) -> dict[str, ToleranceSpec6]:
         """Closed-form linear allocation step for multiple simultaneous point-pair constraints.
 
         Builds a stacked constraint matrix covering all (frame_a, frame_b, target) pairs,
-        then maximises per-DoF bounds subject to all constraints simultaneously.
+        then maximises per-DoF bounds subject to all constraints simultaneously via
+        LoosestAllocation.
 
         Shared edges — those that appear on more than one pair's path — are handled
         correctly by construction: their columns appear in multiple constraint rows, so
@@ -745,8 +635,7 @@ class AllocationEngine:
         dict[str, ToleranceSpec6]
             Proposed tolerance for every free edge appearing on any pair's path.
         """
-        if objective is None:
-            objective = LoosestAllocation()
+        _nlp = LoosestAllocation()
 
         frame_graph.validate_dag()
 
@@ -801,26 +690,16 @@ class AllocationEngine:
         A = np.array(A_rows)
         b = np.array(b_vals)
 
-        # 3. Solve with the objective.
-        if isinstance(objective, LoosestAllocation):
-            x = objective._run_nlp(A, b)
-            full_bounds = np.zeros(6 * N_total)
-            full_bounds[free_idx_global] = x
-            return _build_result(all_free_edges, full_bounds)
-
-        # Fallback for EqualAllocation / RSSAllocation: single scale factor across all pairs.
-        if isinstance(objective, RSSAllocation):
-            s_values = [float(bk / np.sqrt(np.sum(row ** 2))) for row, bk in zip(A, b) if np.sum(row ** 2) > 0]
-        else:  # EqualAllocation or unknown
-            s_values = [float(bk / row.sum()) for row, bk in zip(A, b) if row.sum() > 0]
-        s = min(s_values) if s_values else 1.0
-        return _build_result(all_free_edges, np.full(6 * N_total, s))
+        # 3. Solve via LoosestAllocation NLP.
+        x = _nlp._run_nlp(A, b)
+        full_bounds = np.zeros(6 * N_total)
+        full_bounds[free_idx_global] = x
+        return _build_result(all_free_edges, full_bounds)
 
     @staticmethod
     def allocate_multi(
         frame_graph: FrameGraph,
         targets: list[tuple[str, str, ToleranceSpec6]],
-        objective: AllocationObjective | None = None,
         n_validate: int = 1000,
         gamma: float = 0.9,
         max_iter: int = 10,
@@ -829,18 +708,14 @@ class AllocationEngine:
         """Iterative inverse allocation for multiple simultaneous point-pair constraints.
 
         Identical in structure to allocate() but optimises per-DoF bounds so that
-        ALL specified (frame_a, frame_b, target_tolerance) pairs are satisfied at once.
-        The per_pair_validation field of the returned AllocationResult contains individual
-        ValidationReport objects for each pair.
+        ALL specified (frame_a, frame_b, target_tolerance) pairs are satisfied at once
+        via LoosestAllocation.  The per_pair_validation field of the returned
+        AllocationResult contains individual ValidationReport objects for each pair.
 
         The damping loop applies gamma to ALL free angular DoFs when ANY pair fails MC
         validation.  The bisection step recovers the slack introduced by the fixed step.
         """
-        if objective is None:
-            objective = LoosestAllocation()
-        method_name = type(objective).__name__
-
-        baseline = AllocationEngine.solve_multi(frame_graph, targets, objective)
+        baseline = AllocationEngine.solve_multi(frame_graph, targets)
 
         all_passed, per_pair = _mc_validate_multi(frame_graph, baseline, targets, n_validate, seed)
 
@@ -858,7 +733,7 @@ class AllocationEngine:
                 final_validation_report=combined_report,
                 per_pair_validation=per_pair,
                 per_pair_targets=targets,
-                method=method_name,
+                method="LoosestAllocation",
             )
 
         current = copy.deepcopy(baseline)
@@ -883,7 +758,7 @@ class AllocationEngine:
                     final_validation_report=combined_report,
                     per_pair_validation=per_pair,
                     per_pair_targets=targets,
-                    method=method_name,
+                    method="LoosestAllocation",
                 )
 
         combined_report = _combine_validation_reports(per_pair)

@@ -8,7 +8,7 @@ import pytest
 from core.frame_graph import FrameGraph
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from core.transforms import HTM
-from sim.allocation import DOF_LABELS, AllocationEngine, EqualAllocation, LoosestAllocation, _mc_validate_multi
+from sim.allocation import DOF_LABELS, AllocationEngine, LoosestAllocation, _mc_validate_multi
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ def make_lever_arm_chain(L=1.0):
           dy = L · sin(δrz) ≈ L · δrz          (first order — MISSED by Jacobian)
           dx = L · (cos(δrz) − 1) ≈ 0           (second order)
 
-      With L=1 m and rz-bound = B_rz = 0.10 rad allocated by EqualAllocation:
+      With L=1 m and rz-bound ≈ B_rz = 0.10 rad (LoosestAllocation, uncoupled):
           dy_mc ≈ 0.10 m  >>  B_dy = 0.05 m  → validation FAILS
 
       Damping tightens rz by 0.9 per iteration:
@@ -95,7 +95,7 @@ def make_lever_arm_chain(L=1.0):
 def _lever_target(b_trans=0.05, b_rx=0.20, b_rz=0.10):
     """Symmetric target tolerance for lever-arm tests.
 
-    EqualAllocation sets rz-bound = b_rz (only rz output is sensitive to rz input
+    LoosestAllocation allocates rz-bound ≈ b_rz (only rz output is sensitive to rz input
     at the linear level). MC then produces dy ≈ L·b_rz; fails when L·b_rz > b_trans.
     """
     return ToleranceSpec6(
@@ -106,17 +106,18 @@ def _lever_target(b_trans=0.05, b_rx=0.20, b_rz=0.10):
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
-def test_equal_allocation_sanity():
-    """All free edges receive the same bound on every DoF (equal-allocation property)."""
+def test_solve_returns_all_free_edges():
+    """solve() must return a dict covering exactly the free edges on the path."""
     fg, fa, fb = make_simple_chain(n_edges=3)
     target = ToleranceSpec6(*[_spec(3.0) for _ in range(6)])
     result = AllocationEngine.solve(fg, fa, fb, target)
 
-    assert len(result) == 3
+    assert set(result.keys()) == {"e0", "e1", "e2"}
+    # Symmetric chain + symmetric target → bounds should be equal across edges
     ref = result["e0"]
     for edge_name in ("e1", "e2"):
         for j in range(6):
-            assert result[edge_name][j].bound == pytest.approx(ref[j].bound), (
+            assert result[edge_name][j].bound == pytest.approx(ref[j].bound, rel=0.01), (
                 f"edge {edge_name} DoF {j}: bound mismatch with reference edge"
             )
 
@@ -234,21 +235,17 @@ def test_allocation_result_preserves_both_allocations():
 
 # ── LoosestAllocation tests ───────────────────────────────────────────────────
 
-def test_loosest_allocation_beats_equal_on_mixed_target():
-    """LoosestAllocation allocates each DoF's budget independently; EqualAllocation wastes it.
+def test_solve_fills_independent_dof_budgets():
+    """solve() must fill each DoF's budget independently when constraints are decoupled.
 
     2-edge identity chain: tight dx target (0.01), loose rz target (10.0).
 
-    With identity Jacobian, the dx constraint is:  b_dx0 + b_dx1 ≤ 0.01
-    EqualAllocation: s = min(B_dx/2, B_rz/2) = 0.01/2 = 0.005.
-        - Total dx budget used: 0.005+0.005 = 0.01  (full)
-        - Total rz budget used: 0.005+0.005 = 0.01  (wastes 9.99 of available 10.0!)
+    With identity Jacobian the constraints are per-DoF independent:
+        b_dx0 + b_dx1  ≤  0.01   (tight)
+        b_rz0 + b_rz1  ≤  10.0   (loose)
 
-    LoosestAllocation LP: treats each output DoF constraint independently.
-        - Total dx: still 0.01 (constraint is tight)
-        - Total rz: fills to 10.0 (LP uses the full rz budget)
-
-    Key assertion: sum(LP rz bounds) >> sum(Equal rz bounds).
+    LoosestAllocation must fill BOTH to their respective limits — it must not
+    let the tight dx constraint drag rz down to the same small value.
     """
     fg = FrameGraph()
     for name in ("f0", "f1", "f2"):
@@ -257,7 +254,6 @@ def test_loosest_allocation_beats_equal_on_mixed_target():
     fg.add_edge("f0", "f1", HTM.from_xyz_euler([0, 0, 0], [0, 0, 0]), free_tol, name="e0")
     fg.add_edge("f1", "f2", HTM.from_xyz_euler([0, 0, 0], [0, 0, 0]), free_tol, name="e1")
 
-    # Very tight dx, very loose rz — the binding constraint is dx for EqualAllocation
     target = ToleranceSpec6(
         _spec(0.01),   # dx tight
         _spec(5.0),    # dy loose
@@ -267,29 +263,16 @@ def test_loosest_allocation_beats_equal_on_mixed_target():
         _spec(10.0),   # rz very loose
     )
 
-    equal_result = AllocationEngine.solve(fg, "f0", "f2", target, objective=EqualAllocation())
-    lp_result = AllocationEngine.solve(fg, "f0", "f2", target, objective=LoosestAllocation())
+    result = AllocationEngine.solve(fg, "f0", "f2", target)
 
-    # Compare total budget used per DoF (sum across edges) — not per-edge (LP may split unevenly)
-    def total_bound(result, dof_idx):
+    def total_bound(dof_idx):
         return sum(result[e][dof_idx].bound for e in ("e0", "e1"))
 
-    # Both methods must use the full dx budget (constraint is tight at the sum level)
-    assert total_bound(lp_result, 0) == pytest.approx(0.01, rel=0.01), (
-        f"LP total dx budget should equal target 0.01; got {total_bound(lp_result, 0):.6f}"
+    assert total_bound(0) == pytest.approx(0.01, rel=0.01), (
+        f"total dx must fill target 0.01; got {total_bound(0):.6f}"
     )
-    assert total_bound(equal_result, 0) == pytest.approx(0.01, rel=0.01), (
-        f"Equal total dx budget should equal target 0.01; got {total_bound(equal_result, 0):.6f}"
-    )
-
-    # LP must use the full rz budget (≈10.0); EqualAllocation wastes it (≈0.01)
-    lp_rz_total = total_bound(lp_result, 5)
-    equal_rz_total = total_bound(equal_result, 5)
-    assert lp_rz_total == pytest.approx(10.0, rel=0.01), (
-        f"LP total rz budget should fill target 10.0; got {lp_rz_total:.4f}"
-    )
-    assert lp_rz_total > equal_rz_total * 50, (
-        f"LP rz total ({lp_rz_total:.4f}) should far exceed equal rz total ({equal_rz_total:.4f})"
+    assert total_bound(5) == pytest.approx(10.0, rel=0.01), (
+        f"total rz must fill target 10.0; got {total_bound(5):.4f}"
     )
 
 
@@ -307,7 +290,7 @@ def test_loosest_allocation_mc_validation_passes():
     alloc_target = ToleranceSpec6(*[_spec(0.4) for _ in range(6)])
     check_target  = ToleranceSpec6(*[_spec(0.6) for _ in range(6)])  # 50% margin
 
-    lp_alloc = AllocationEngine.solve(fg, fa, fb, alloc_target, objective=LoosestAllocation())
+    lp_alloc = AllocationEngine.solve(fg, fa, fb, alloc_target)
     report = AllocationEngine.validate(fg, lp_alloc, fa, fb, check_target, n_trials=2000, seed=7)
 
     assert report.passed, (
@@ -335,7 +318,7 @@ def test_loosest_allocation_no_zero_bounds_on_coupled_chain():
 
     target = ToleranceSpec6(*[_spec(0.001) for _ in range(6)])
 
-    result = AllocationEngine.solve(fg, "a", "b", target, objective=LoosestAllocation())
+    result = AllocationEngine.solve(fg, "a", "b", target)
 
     min_bound = 1e-6  # any finite, positive tolerance is acceptable
     for j in range(6):
@@ -358,7 +341,6 @@ def test_loosest_allocation_lever_arm_converges():
 
     result = AllocationEngine.allocate(
         fg, fa, fb, target,
-        objective=LoosestAllocation(),
         n_validate=1000, gamma=0.9, max_iter=15, seed=42,
     )
 
@@ -415,7 +397,7 @@ def test_solve_multi_shared_edge_respects_tighter_constraint():
     target2 = ToleranceSpec6(_spec(1.0),  *[_spec(5.0)] * 5)
     targets = [("root", "m1", target1), ("root", "m2", target2)]
 
-    alloc = AllocationEngine.solve_multi(fg, targets, objective=LoosestAllocation())
+    alloc = AllocationEngine.solve_multi(fg, targets)
 
     # All three free edges must appear in the allocation
     assert set(alloc.keys()) == {"e_rb", "e_bm1", "e_bm2"}
@@ -455,7 +437,7 @@ def test_solve_multi_independent_pairs_unaffected():
     target2 = ToleranceSpec6(_spec(0.5),  *[_spec(5.0)] * 5)  # looser dx for pair 2
     targets = [("f0", "f1", target1), ("f2", "f3", target2)]
 
-    alloc = AllocationEngine.solve_multi(fg, targets, objective=LoosestAllocation())
+    alloc = AllocationEngine.solve_multi(fg, targets)
 
     # Only edges on the respective paths appear
     assert set(alloc.keys()) == {"e0", "e2"}, f"Unexpected edges: {set(alloc.keys())}"
@@ -478,7 +460,6 @@ def test_allocate_multi_result_structure():
 
     result = AllocationEngine.allocate_multi(
         fg, targets,
-        objective=LoosestAllocation(),
         n_validate=200, max_iter=30, seed=42,
     )
 
@@ -526,7 +507,7 @@ def test_allocate_multi_mc_validation_check_target():
     targets_alloc  = [("f0", "f1", alloc_target), ("f2", "f3", alloc_target)]
     targets_check  = [("f0", "f1", check_target),  ("f2", "f3", check_target)]
 
-    alloc = AllocationEngine.solve_multi(fg, targets_alloc, objective=LoosestAllocation())
+    alloc = AllocationEngine.solve_multi(fg, targets_alloc)
 
     # Each edge gets 0.4 budget (single edge per pair)
     assert alloc["e0"].dx.bound == pytest.approx(0.4, rel=0.01)
@@ -573,7 +554,6 @@ def test_allocate_multi_lever_arm_two_pairs():
 
     result = AllocationEngine.allocate_multi(
         fg, targets,
-        objective=LoosestAllocation(),
         n_validate=1000, gamma=0.9, max_iter=20, seed=42,
     )
 

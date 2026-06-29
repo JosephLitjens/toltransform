@@ -37,13 +37,7 @@ from PySide6.QtWidgets import (
 
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from persistence.schema import ProjectModel, project_model_to_frame_graph
-from sim.allocation import (
-    AllocationEngine,
-    AllocationResult,
-    EqualAllocation,
-    LoosestAllocation,
-    RSSAllocation,
-)
+from sim.allocation import AllocationEngine, AllocationResult
 from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData
 
 _DOF_NAMES = ("dx", "dy", "dz", "rx", "ry", "rz")
@@ -155,7 +149,6 @@ class _RunWorker(QThread):
         n_trials: int,
         seed: int,
         ik_targets: list[tuple[str, str, ToleranceSpec6]] | None = None,
-        objective=None,
         max_iter: int = 30,
         parent: QWidget | None = None,
     ) -> None:
@@ -165,7 +158,6 @@ class _RunWorker(QThread):
         self._n_trials = n_trials
         self._seed = seed
         self._ik_targets = ik_targets or []
-        self._objective = objective
         self._max_iter = max_iter
 
     def run(self) -> None:
@@ -178,7 +170,6 @@ class _RunWorker(QThread):
                 result = AllocationEngine.allocate_multi(
                     self._frame_graph,
                     self._ik_targets,
-                    objective=self._objective,
                     seed=self._seed,
                     n_validate=1000,
                     max_iter=self._max_iter,
@@ -295,16 +286,7 @@ class RunPanelWidget(QWidget):
         self._ik_group = QGroupBox("IK Allocation")
         layout = QVBoxLayout(self._ik_group)
 
-        # ── Method + iterations ───────────────────────────────────────────────
-        method_row = QHBoxLayout()
-        method_row.addWidget(QLabel("Method:"))
-        self._method_combo = QComboBox()
-        self._method_combo.addItem("Loosest (LP)", "lp")
-        self._method_combo.addItem("Statistical (RSS)", "rss")
-        self._method_combo.addItem("Worst-Case (Linear Sum)", "wc")
-        method_row.addWidget(self._method_combo, stretch=1)
-        layout.addLayout(method_row)
-
+        # ── Iterations ────────────────────────────────────────────────────────
         iter_row = QHBoxLayout()
         iter_row.addWidget(QLabel("Max iterations:"))
         self._max_iter_spin = QSpinBox()
@@ -462,12 +444,6 @@ class RunPanelWidget(QWidget):
             if ik_targets is None:
                 return
             max_iter = self._max_iter_spin.value()
-            _method = self._method_combo.currentData()
-            objective = (
-                LoosestAllocation() if _method == "lp"
-                else RSSAllocation() if _method == "rss"
-                else EqualAllocation()
-            )
 
         try:
             frame_graph = project_model_to_frame_graph(self._project)
@@ -485,7 +461,6 @@ class RunPanelWidget(QWidget):
             n_trials=n_trials,
             seed=seed,
             ik_targets=ik_targets,
-            objective=objective,
             max_iter=max_iter,
             parent=self,
         )
