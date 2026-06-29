@@ -36,7 +36,13 @@ from PySide6.QtWidgets import (
 )
 
 from core.tolerance import ToleranceSpec, ToleranceSpec6
-from persistence.schema import ProjectModel, project_model_to_frame_graph
+from persistence.schema import (
+    IKConstraintModel,
+    ProjectModel,
+    ToleranceSpecModel,
+    ToleranceSpec6Model,
+    project_model_to_frame_graph,
+)
 from sim.allocation import AllocationEngine, AllocationResult
 from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData
 
@@ -48,7 +54,8 @@ _DOF_NAMES = ("dx", "dy", "dz", "rx", "ry", "rz")
 class _ConstraintRowWidget(QWidget):
     """One (frame_a → frame_b, target) row in the multi-pair IK constraint list."""
 
-    removed = Signal(object)  # emits self; connected by RunPanelWidget
+    removed = Signal(object)   # emits self; connected by RunPanelWidget
+    changed = Signal()         # emits on any frame pair or target change
 
     def __init__(self, frame_names: list[str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -109,6 +116,12 @@ class _ConstraintRowWidget(QWidget):
         sep.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep)
 
+        # Wire changes so the run panel can persist them to the project model.
+        self._frame_a_combo.currentIndexChanged.connect(self.changed)
+        self._frame_b_combo.currentIndexChanged.connect(self.changed)
+        for spin in self._spins:
+            spin.valueChanged.connect(self.changed)
+
     def refresh_frames(self, frame_names: list[str]) -> None:
         for combo in (self._frame_a_combo, self._frame_b_combo):
             current = combo.currentText()
@@ -119,6 +132,22 @@ class _ConstraintRowWidget(QWidget):
             idx = combo.findText(current)
             combo.setCurrentIndex(max(0, idx))
             combo.blockSignals(False)
+
+    def set_frame_pair(self, frame_a: str, frame_b: str) -> None:
+        """Set frame pair without emitting changed (used during load)."""
+        for combo, name in ((self._frame_a_combo, frame_a), (self._frame_b_combo, frame_b)):
+            combo.blockSignals(True)
+            idx = combo.findText(name)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+
+    def set_target_model(self, target: "ToleranceSpec6Model") -> None:
+        """Populate spinboxes from a ToleranceSpec6Model without emitting changed."""
+        for spin, dof in zip(self._spins, _DOF_NAMES):
+            spin.blockSignals(True)
+            spin.setValue(getattr(target, dof).bound)
+            spin.blockSignals(False)
 
     def set_remove_enabled(self, enabled: bool) -> None:
         self._remove_btn.setEnabled(enabled)
@@ -235,6 +264,7 @@ class RunPanelWidget(QWidget):
         self._n_trials_spin.valueChanged.connect(self._on_n_trials_changed)
         self._seed_spin.valueChanged.connect(self._on_seed_changed)
         self._randomize_btn.clicked.connect(self._on_randomize_seed)
+        self._max_iter_spin.valueChanged.connect(self._on_max_iter_changed)
 
         # Initialise IK group visibility
         self._update_ik_group_visibility()
@@ -321,16 +351,19 @@ class RunPanelWidget(QWidget):
 
     # ── Constraint row management ─────────────────────────────────────────────
 
-    def _add_constraint_row(self) -> None:
+    def _add_constraint_row(self) -> _ConstraintRowWidget:
         frame_names = self._current_frame_names()
         row = _ConstraintRowWidget(frame_names, parent=self._constraints_container)
         row.removed.connect(self._on_remove_constraint)
+        row.changed.connect(self._on_constraints_changed)
         self._constraints_layout.addWidget(row)
         self._constraint_rows.append(row)
         self._update_remove_buttons()
+        return row
 
     def _on_add_constraint(self) -> None:
         self._add_constraint_row()
+        self._save_ik_constraints_to_project()
 
     def _on_remove_constraint(self, row: _ConstraintRowWidget) -> None:
         if len(self._constraint_rows) <= 1:
@@ -339,6 +372,7 @@ class RunPanelWidget(QWidget):
         self._constraints_layout.removeWidget(row)
         row.deleteLater()
         self._update_remove_buttons()
+        self._save_ik_constraints_to_project()
 
     def _update_remove_buttons(self) -> None:
         only_one = len(self._constraint_rows) == 1
@@ -361,16 +395,67 @@ class RunPanelWidget(QWidget):
         if self._project is None:
             return
         s = self._project.sim_settings
-        for w in (self._mode_combo, self._n_trials_spin, self._seed_spin):
+        for w in (self._mode_combo, self._n_trials_spin, self._seed_spin, self._max_iter_spin):
             w.blockSignals(True)
         idx = self._mode_combo.findData(s.mode)
         if idx >= 0:
             self._mode_combo.setCurrentIndex(idx)
         self._n_trials_spin.setValue(s.n_trials)
         self._seed_spin.setValue(s.seed)
-        for w in (self._mode_combo, self._n_trials_spin, self._seed_spin):
+        self._max_iter_spin.setValue(s.ik_max_iter)
+        for w in (self._mode_combo, self._n_trials_spin, self._seed_spin, self._max_iter_spin):
             w.blockSignals(False)
         self._update_ik_group_visibility()
+        self._load_ik_constraints_from_project()
+
+    def _load_ik_constraints_from_project(self) -> None:
+        """Rebuild constraint rows from project.sim_settings.ik_constraints."""
+        if self._project is None:
+            return
+        saved = self._project.sim_settings.ik_constraints
+        if not saved:
+            return  # keep the default single empty row
+
+        # Clear existing rows silently.
+        for row in list(self._constraint_rows):
+            self._constraints_layout.removeWidget(row)
+            row.deleteLater()
+        self._constraint_rows.clear()
+
+        frame_names = self._current_frame_names()
+        for constraint in saved:
+            row = _ConstraintRowWidget(frame_names, parent=self._constraints_container)
+            row.removed.connect(self._on_remove_constraint)
+            row.changed.connect(self._on_constraints_changed)
+            self._constraints_layout.addWidget(row)
+            self._constraint_rows.append(row)
+            row.set_frame_pair(constraint.frame_a, constraint.frame_b)
+            row.set_target_model(constraint.target)
+
+        self._update_remove_buttons()
+
+    def _save_ik_constraints_to_project(self) -> None:
+        """Persist current constraint rows to project.sim_settings.ik_constraints."""
+        if self._project is None:
+            return
+        constraints: list[IKConstraintModel] = []
+        for row in self._constraint_rows:
+            frame_a, frame_b = row.get_frame_pair()
+            if not frame_a or not frame_b:
+                continue
+            tol6 = row.get_target()
+            target_model = ToleranceSpec6Model(
+                dx=ToleranceSpecModel(distribution="uniform", bound=tol6.dx.bound),
+                dy=ToleranceSpecModel(distribution="uniform", bound=tol6.dy.bound),
+                dz=ToleranceSpecModel(distribution="uniform", bound=tol6.dz.bound),
+                rx=ToleranceSpecModel(distribution="uniform", bound=tol6.rx.bound),
+                ry=ToleranceSpecModel(distribution="uniform", bound=tol6.ry.bound),
+                rz=ToleranceSpecModel(distribution="uniform", bound=tol6.rz.bound),
+            )
+            constraints.append(
+                IKConstraintModel(frame_a=frame_a, frame_b=frame_b, target=target_model)
+            )
+        self._project.sim_settings.ik_constraints = constraints
 
     def _update_ik_group_visibility(self) -> None:
         self._ik_group.setVisible(
@@ -419,6 +504,15 @@ class RunPanelWidget(QWidget):
         if self._project is not None:
             self._project.sim_settings.seed = value
             self.project_changed.emit()
+
+    def _on_max_iter_changed(self, value: int) -> None:
+        if self._project is not None:
+            self._project.sim_settings.ik_max_iter = value
+            self.project_changed.emit()
+
+    def _on_constraints_changed(self) -> None:
+        self._save_ik_constraints_to_project()
+        self.project_changed.emit()
 
     def _on_randomize_seed(self) -> None:
         self._seed_spin.setValue(random.randint(0, 2**31 - 1))

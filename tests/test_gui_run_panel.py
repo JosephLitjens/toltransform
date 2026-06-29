@@ -16,6 +16,7 @@ from persistence.schema import (
     FrameModel,
     HTMEdgeModel,
     HTMInputXyzEuler,
+    IKConstraintModel,
     ProjectModel,
     SimSettingsModel,
     ToleranceSpec6Model,
@@ -182,15 +183,16 @@ def test_run_panel_ik_run_emits_allocation_result(qtbot):
     project = _make_project(mode="ik_allocation", n_trials=50, seed=7)
     widget.set_project(project)
 
-    # Switch to IK mode and configure frame pair
+    # Switch to IK mode and configure frame pair via the first constraint row
     idx = widget._mode_combo.findData("ik_allocation")
     widget._mode_combo.setCurrentIndex(idx)
 
-    widget._frame_a_combo.setCurrentText("A")
-    widget._frame_b_combo.setCurrentText("B")
+    row = widget._constraint_rows[0]
+    row._frame_a_combo.setCurrentText("A")
+    row._frame_b_combo.setCurrentText("B")
 
     # Set a non-zero target bound so the allocation has something to do
-    for spin in widget._target_bound_spins:
+    for spin in row._spins:
         spin.setValue(0.01)
 
     received = []
@@ -221,3 +223,108 @@ def test_run_panel_no_edges_shows_error(qtbot):
 
     assert len(fired) == 0
     assert "Error" in widget._status_label.text()
+
+
+# ── IK constraint persistence tests ───────────────────────────────────────────
+
+def _make_ik_constraint(frame_a: str = "A", frame_b: str = "B",
+                         bound: float = 0.005) -> IKConstraintModel:
+    s = ToleranceSpecModel(distribution="uniform", bound=bound)
+    return IKConstraintModel(
+        frame_a=frame_a, frame_b=frame_b,
+        target=ToleranceSpec6Model(dx=s, dy=s, dz=s, rx=s, ry=s, rz=s),
+    )
+
+
+def test_run_panel_loads_ik_constraints_into_rows(qtbot):
+    """set_project with saved ik_constraints populates one row per constraint."""
+    widget = RunPanelWidget()
+    qtbot.addWidget(widget)
+    c1 = _make_ik_constraint("A", "B", 0.005)
+    c2 = _make_ik_constraint("B", "A", 0.010)
+    project = _make_project(mode="ik_allocation")
+    project.sim_settings.ik_constraints = [c1, c2]
+    widget.set_project(project)
+
+    assert len(widget._constraint_rows) == 2
+    assert widget._constraint_rows[0].get_frame_pair() == ("A", "B")
+    assert widget._constraint_rows[1].get_frame_pair() == ("B", "A")
+
+
+def test_run_panel_loaded_row_targets_match_model(qtbot):
+    """Spinbox values reflect the saved target bounds after set_project."""
+    widget = RunPanelWidget()
+    qtbot.addWidget(widget)
+    c = _make_ik_constraint("A", "B", 0.007)
+    project = _make_project(mode="ik_allocation")
+    project.sim_settings.ik_constraints = [c]
+    widget.set_project(project)
+
+    row = widget._constraint_rows[0]
+    tol6 = row.get_target()
+    for dof in ("dx", "dy", "dz", "rx", "ry", "rz"):
+        assert getattr(tol6, dof).bound == pytest.approx(0.007)
+
+
+def test_run_panel_max_iter_writes_back_to_project(qtbot):
+    """Changing max_iter spinbox updates project.sim_settings.ik_max_iter."""
+    widget = RunPanelWidget()
+    qtbot.addWidget(widget)
+    project = _make_project(mode="ik_allocation")
+    project.sim_settings.ik_max_iter = 30
+    widget.set_project(project)
+
+    widget._max_iter_spin.setValue(50)
+
+    assert project.sim_settings.ik_max_iter == 50
+
+
+def test_run_panel_max_iter_emits_project_changed(qtbot):
+    """Changing max_iter emits project_changed."""
+    widget = RunPanelWidget()
+    qtbot.addWidget(widget)
+    project = _make_project(mode="ik_allocation")
+    widget.set_project(project)
+
+    with qtbot.waitSignal(widget.project_changed, timeout=500):
+        widget._max_iter_spin.setValue(99)
+
+
+def test_run_panel_constraint_row_frame_change_writes_back(qtbot):
+    """Changing a row's frame_b combo updates project.sim_settings.ik_constraints."""
+    widget = RunPanelWidget()
+    qtbot.addWidget(widget)
+    project = _make_project(mode="ik_allocation")
+    widget.set_project(project)
+
+    row = widget._constraint_rows[0]
+    # Set frame_a to "A", frame_b to "B"
+    row._frame_a_combo.setCurrentText("A")
+    row._frame_b_combo.setCurrentText("B")
+
+    constraints = project.sim_settings.ik_constraints
+    assert any(c.frame_a == "A" and c.frame_b == "B" for c in constraints)
+
+
+def test_run_panel_add_constraint_row_updates_project(qtbot):
+    """Clicking Add Constraint adds a row and saves to project."""
+    widget = RunPanelWidget()
+    qtbot.addWidget(widget)
+    project = _make_project(mode="ik_allocation")
+    widget.set_project(project)
+
+    initial_rows = len(widget._constraint_rows)
+    widget._add_constraint_btn.click()
+
+    assert len(widget._constraint_rows) == initial_rows + 1
+
+
+def test_run_panel_loads_max_iter_from_project(qtbot):
+    """set_project restores ik_max_iter from project.sim_settings."""
+    widget = RunPanelWidget()
+    qtbot.addWidget(widget)
+    project = _make_project(mode="ik_allocation")
+    project.sim_settings.ik_max_iter = 75
+    widget.set_project(project)
+
+    assert widget._max_iter_spin.value() == 75

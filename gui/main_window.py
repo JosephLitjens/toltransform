@@ -118,6 +118,7 @@ class MainWindow(QMainWindow):
 
         # Results Viewer (C-4)
         self._results_viewer = ResultsViewerWidget()
+        self._results_viewer.project_changed.connect(self._on_allocation_applied)
         rv_dock = QDockWidget("Results Viewer", self)
         rv_dock.setObjectName("ResultsViewerDock")
         rv_dock.setWidget(self._results_viewer)
@@ -297,6 +298,11 @@ class MainWindow(QMainWindow):
 
     def _on_project_changed(self) -> None:
         self._set_dirty(True)
+
+    def _on_allocation_applied(self) -> None:
+        """Called when the results viewer writes IK allocation bounds back to the project."""
+        self._set_dirty(True)
+        self._tolerance_editor.refresh_view()
 
     def _set_dirty(self, dirty: bool = True) -> None:
         self._dirty = dirty

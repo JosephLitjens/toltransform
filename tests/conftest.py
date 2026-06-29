@@ -22,6 +22,35 @@ from core.frame_graph import FrameGraph
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from core.transforms import HTM
 
+try:
+    from PySide6.QtWidgets import QApplication
+
+    @pytest.fixture(autouse=True)
+    def _qt_main_window_test_guard(monkeypatch):
+        """Prevent MainWindow QSettings and dirty-dialog hangs in offscreen tests.
+
+        Two root causes interact when consecutive tests each create a MainWindow:
+          1. _set_dirty(True) → qtbot closeEvent → _confirm_discard_changes()
+             → QMessageBox.question() → hangs in offscreen mode.
+          2. _save_settings() writes dock state; _restore_settings() in the next
+             test's MainWindow() call reads and tries to apply it, which can
+             block when the offscreen display has no real window geometry.
+
+        Fix: patch both methods to no-ops for every test. Monkeypatch auto-reverts.
+        """
+        try:
+            from gui.main_window import MainWindow
+            monkeypatch.setattr(MainWindow, '_save_settings', lambda self: None)
+            monkeypatch.setattr(MainWindow, '_restore_settings', lambda self: None)
+        except ImportError:
+            pass
+        yield
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+except ImportError:
+    pass  # PySide6 not available; skip fixture
+
 # ── Global numerical tolerance constants ──────────────────────────────────────
 
 DEFAULT_ATOL = 1e-9

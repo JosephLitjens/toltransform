@@ -88,11 +88,13 @@ def test_graph_change_refreshes_run_panel_combos(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
 
-    initial_count = window._run_panel._frame_a_combo.count()
+    # Frame combos live inside the constraint rows, not directly on RunPanelWidget.
+    row = window._run_panel._constraint_rows[0]
+    initial_count = row._frame_a_combo.count()
     window._project.frames.append(FrameModel(name="NewFrame"))
     window._on_graph_editor_changed()
 
-    assert window._run_panel._frame_a_combo.count() == initial_count + 1
+    assert row._frame_a_combo.count() == initial_count + 1
 
 
 def test_graph_change_refreshes_point_pair_combos(qtbot):
