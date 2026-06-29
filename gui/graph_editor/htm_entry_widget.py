@@ -10,6 +10,7 @@ The OK button in any host dialog should be gated on is_valid().
 
 from __future__ import annotations
 
+import math as _math
 import numpy as np
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -148,7 +149,6 @@ class HTMEntryWidget(QWidget):
         page = QWidget()
         form = QFormLayout(page)
         self._xyz_euler_xyz = [_spinbox() for _ in range(3)]
-        import math as _math
         self._xyz_euler_angles = [_spinbox(-9999.0, 9999.0) for _ in range(3)]
         for sb in self._xyz_euler_angles:
             sb.setSingleStep(_math.pi / 12)  # 15° in radians

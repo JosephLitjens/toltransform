@@ -12,6 +12,7 @@ and numpy — no FrameGraph or core.* objects are constructed during editing.
 
 from __future__ import annotations
 
+from collections import deque
 import numpy as np
 from scipy.spatial.transform import Rotation as SciRotation
 
@@ -68,7 +69,7 @@ def _nominal_to_matrix(model: HTMInputModel) -> np.ndarray:
         T[:3, :3] = SciRotation.from_quat([x, y, z, w]).as_matrix()  # scipy: [x,y,z,w]
         T[:3, 3] = model.xyz
     elif isinstance(model, HTMInputScrew):
-        axis = np.array(model.screw_axis, dtype=float)
+        axis = np.array(model.axis, dtype=float)
         norm = np.linalg.norm(axis)
         if norm > 1e-10:
             axis = axis / norm
@@ -101,7 +102,7 @@ def _compute_world_transforms(project: ProjectModel) -> dict[str, np.ndarray]:
         in_degree[edge.child] = in_degree.get(edge.child, 0) + 1
 
     # Kahn's topological sort
-    queue = [name for name, deg in in_degree.items() if deg == 0]
+    queue: deque[str] = deque(name for name, deg in in_degree.items() if deg == 0)
     topo: list[str] = []
     remaining = dict(in_degree)
 
@@ -110,7 +111,7 @@ def _compute_world_transforms(project: ProjectModel) -> dict[str, np.ndarray]:
         children_of[edge.parent].append(edge.child)
 
     while queue:
-        node = queue.pop(0)
+        node = queue.popleft()
         topo.append(node)
         for child in children_of.get(node, []):
             remaining[child] -= 1

@@ -15,9 +15,6 @@ import numpy as np
 
 from core import conversions
 
-# Locked convention — single definition, referenced by all methods.
-_EULER_CONVENTION = "intrinsic_zyx"
-
 _BOTTOM_ROW = np.array([0.0, 0.0, 0.0, 1.0])
 _BOTTOM_ROW_TOL = 1e-9
 _ORTHO_TOL = 1e-6
@@ -73,38 +70,25 @@ class HTM:
         cls,
         xyz: np.ndarray,
         euler_angles: np.ndarray,
-        convention: str = _EULER_CONVENTION,
     ) -> HTM:
-        """Construct from a translation vector and intrinsic ZYX Euler angles.
-
-        Parameters
-        ----------
-        xyz : array-like, shape (3,)
-            Translation [x, y, z].
-        euler_angles : array-like, shape (3,)
-            [ez, ey, ex] in radians — yaw (Z), pitch (Y'), roll (X'').
-        convention : str
-            Must be "intrinsic_zyx".
-        """
+        """Construct from a translation vector and intrinsic ZYX Euler angles [ez, ey, ex] in radians."""
         xyz = np.asarray(xyz, dtype=float)
         euler_angles = np.asarray(euler_angles, dtype=float)
-        R = conversions.euler_to_rotation_matrix(euler_angles, convention=convention)
+        R = conversions.euler_to_rotation_matrix(euler_angles)
         T = _build_htm(R, xyz)
         return cls(
             T,
             {
                 "kind": "xyz_euler",
-                "raw_params": {"xyz": xyz.copy(), "euler_angles": euler_angles.copy(), "convention": convention},
+                "raw_params": {"xyz": xyz.copy(), "euler_angles": euler_angles.copy()},
             },
         )
 
     @classmethod
     def from_matrix(cls, matrix: np.ndarray) -> HTM:
         """Construct from a 4x4 NumPy array (validated on entry)."""
-        return cls(
-            np.asarray(matrix, dtype=np.float64),
-            {"kind": "matrix", "raw_params": {"matrix": np.asarray(matrix, dtype=np.float64).copy()}},
-        )
+        m = np.asarray(matrix, dtype=np.float64)
+        return cls(m, {"kind": "matrix", "raw_params": {"matrix": m.copy()}})
 
     @classmethod
     def from_quaternion(cls, quat_wxyz: np.ndarray, xyz: np.ndarray) -> HTM:
@@ -179,19 +163,11 @@ class HTM:
 
     # ── Converters ──────────────────────────────────────────────────────────
 
-    def to_xyz_euler(
-        self, convention: str = _EULER_CONVENTION
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Return (xyz, euler_angles) — round-trip independent of construction form.
-
-        Returns
-        -------
-        xyz : np.ndarray, shape (3,)
-        euler_angles : np.ndarray, shape (3,) — [ez, ey, ex] in radians
-        """
+    def to_xyz_euler(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return (xyz, euler_angles) — xyz shape (3,), euler [ez, ey, ex] in radians."""
         R = self._matrix[:3, :3]
         xyz = self._matrix[:3, 3].copy()
-        euler = conversions.rotation_matrix_to_euler(R, convention=convention)
+        euler = conversions.rotation_matrix_to_euler(R)
         return xyz, euler
 
     def to_quaternion(self) -> tuple[np.ndarray, np.ndarray]:
@@ -244,6 +220,31 @@ class HTM:
             f"HTM(xyz=[{xyz[0]:.4g}, {xyz[1]:.4g}, {xyz[2]:.4g}], "
             f"euler_zyx_deg=[{euler_deg[0]:.4g}, {euler_deg[1]:.4g}, {euler_deg[2]:.4g}])"
         )
+
+
+# ── Math utilities ───────────────────────────────────────────────────────────
+
+def skew(v: np.ndarray) -> np.ndarray:
+    """Batched skew-symmetric matrix from a 3-vector or batch of 3-vectors.
+
+    Parameters
+    ----------
+    v : np.ndarray, shape (..., 3)
+
+    Returns
+    -------
+    np.ndarray, shape (..., 3, 3)
+    """
+    v = np.asarray(v, dtype=float)
+    *batch, _ = v.shape
+    S = np.zeros((*batch, 3, 3))
+    S[..., 0, 1] = -v[..., 2]
+    S[..., 0, 2] =  v[..., 1]
+    S[..., 1, 0] =  v[..., 2]
+    S[..., 1, 2] = -v[..., 0]
+    S[..., 2, 0] = -v[..., 1]
+    S[..., 2, 1] =  v[..., 0]
+    return S
 
 
 # ── Internal helpers ────────────────────────────────────────────────────────

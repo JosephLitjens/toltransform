@@ -73,9 +73,6 @@ class MainWindow(QMainWindow):
         self._setup_docks()
 
     def _setup_menu_bar(self) -> None:
-        view_menu = self.menuBar().addMenu("&View")
-        view_menu.addAction("3D Frame Viewer", self._toggle_frame_viewer, "Ctrl+3")
-
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction("&New", self._new_project, "Ctrl+N")
         file_menu.addAction("&Open...", self._open_project, "Ctrl+O")
@@ -86,6 +83,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Save &As...", self._save_project_as, "Ctrl+Shift+S")
         file_menu.addSeparator()
         file_menu.addAction("E&xit", self.close, "Ctrl+Q")
+
+        view_menu = self.menuBar().addMenu("&View")
+        view_menu.addAction("3D Frame Viewer", self._toggle_frame_viewer, "Ctrl+3")
 
     def _setup_docks(self) -> None:
         self._graph_editor = GraphEditorWidget()
@@ -185,6 +185,16 @@ class MainWindow(QMainWindow):
         self._recent_files = []
         self._rebuild_recent_menu()
 
+    def _apply_project_to_ui(self) -> None:
+        """Push self._project into all panels and reset transient viewer state."""
+        self._graph_editor.set_project(self._project)
+        self._tolerance_editor.set_project(self._project)
+        self._run_panel.set_project(self._project)
+        self._point_pair_panel.set_project(self._project)
+        self._results_viewer.clear()
+        if self._frame_viewer is not None:
+            self._frame_viewer.update_graph(self._project)
+
     def _open_recent(self, path: str) -> None:
         if not self._confirm_discard_changes():
             return
@@ -199,11 +209,7 @@ class MainWindow(QMainWindow):
             return
         self._project = project
         self._path = path
-        self._graph_editor.set_project(self._project)
-        self._tolerance_editor.set_project(self._project)
-        self._run_panel.set_project(self._project)
-        self._point_pair_panel.set_project(self._project)
-        self._results_viewer.clear()
+        self._apply_project_to_ui()
         self._set_dirty(False)
         self._add_recent(path)
         self.statusBar().showMessage(f"Opened: {os.path.basename(path)}")
@@ -215,11 +221,7 @@ class MainWindow(QMainWindow):
             return
         self._project = _empty_project()
         self._path = None
-        self._graph_editor.set_project(self._project)
-        self._tolerance_editor.set_project(self._project)
-        self._run_panel.set_project(self._project)
-        self._point_pair_panel.set_project(self._project)
-        self._results_viewer.clear()
+        self._apply_project_to_ui()
         if self._frame_viewer is not None:
             self._frame_viewer.clear()
         self._set_dirty(False)
@@ -241,11 +243,7 @@ class MainWindow(QMainWindow):
             return
         self._project = project
         self._path = path
-        self._graph_editor.set_project(self._project)
-        self._tolerance_editor.set_project(self._project)
-        self._run_panel.set_project(self._project)
-        self._point_pair_panel.set_project(self._project)
-        self._results_viewer.clear()
+        self._apply_project_to_ui()
         self._set_dirty(False)
         self._add_recent(path)
         self.statusBar().showMessage(f"Opened: {os.path.basename(path)}")

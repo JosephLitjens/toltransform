@@ -420,13 +420,14 @@ class TestComputeToleranceSensitivities:
         assert total == pytest.approx(100.0, abs=1e-9)
 
     def test_uniform_normal_equivalent_variance_same_ranking(self):
-        """Uniform(b) and Normal(b/sqrt(3), sigma_level=1) yield equal contributions.
+        """Proportional scaling preserves ranking between uniform and normal specs.
 
-        Both have variance = b²/3, so rankings and percentages must match exactly.
+        A Normal(b/sqrt(3), sigma_level=1) has the same variance as Uniform(b):
+        both equal b²/3. The test verifies that equivalent-variance specs produce
+        identical Pareto rankings and percentages.
         """
         b = 0.004
-        b_normal = b  # sigma = b_normal/sigma_level = b_normal/1; var = b²
-        # To match uniform variance b²/3: use b_normal = b/sqrt(3), sigma_level=1
+        # Normal equivalent: sigma = (b/sqrt(3))/1, var = b²/3 = uniform variance
         b_normal_equiv = b / np.sqrt(3)
 
         zero = ToleranceSpec("uniform", bound=0.0)

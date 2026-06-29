@@ -289,6 +289,7 @@ class ResultsViewerWidget(QWidget):
         fig = generate_frame_report(self._trial_data, frame_name)
         win = _FigureWindow(fig, f"Frame Report: {frame_name}")
         self._open_windows.append(win)
+        win.destroyed.connect(lambda: self._open_windows.remove(win) if win in self._open_windows else None)
         win.show()
 
     # ── IK display ─────────────────────────────────────────────────────────────
@@ -371,18 +372,18 @@ class ResultsViewerWidget(QWidget):
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         table.setMaximumHeight(210)
 
-        for row, (dof, i) in enumerate(zip(DOF_LABELS, range(6))):
+        for i, dof in enumerate(DOF_LABELS):
             d = vr.achieved_envelope.get(dof, {})
             passed = vr.per_dof_pass.get(dof, False)
             col = 0
-            table.setItem(row, col, _ro_item(dof)); col += 1
+            table.setItem(i, col, _ro_item(dof)); col += 1
             if has_target:
-                table.setItem(row, col, _ro_item(f"±{target[i].bound:.6f}")); col += 1
-            table.setItem(row, col, _ro_item(f"{d.get('min', 0.0):.6f}")); col += 1
-            table.setItem(row, col, _ro_item(f"{d.get('max', 0.0):.6f}")); col += 1
+                table.setItem(i, col, _ro_item(f"±{target[i].bound:.6f}")); col += 1
+            table.setItem(i, col, _ro_item(f"{d.get('min', 0.0):.6f}")); col += 1
+            table.setItem(i, col, _ro_item(f"{d.get('max', 0.0):.6f}")); col += 1
             pass_item = _ro_item("✓" if passed else "✗")
             pass_item.setForeground(QColor("green") if passed else QColor("red"))
-            table.setItem(row, col, pass_item)
+            table.setItem(i, col, pass_item)
 
         return table
 
@@ -477,6 +478,7 @@ class ResultsViewerWidget(QWidget):
             fig = generate_sensitivity_report(report)
             win = _FigureWindow(fig, f"Pareto Sensitivity: {frame_a} → {frame_b}")
             self._open_windows.append(win)
+            win.destroyed.connect(lambda: self._open_windows.remove(win) if win in self._open_windows else None)
             win.show()
             self._pareto_status_label.setText("")
         except Exception as exc:

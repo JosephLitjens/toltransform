@@ -22,7 +22,6 @@ from persistence.schema import (
     HTMInputQuaternion,
     HTMInputScrew,
     HTMInputXyzEuler,
-    HTMEdgeModel,
     IKConstraintModel,
     ProjectModel,
     SavedAnalysisModel,

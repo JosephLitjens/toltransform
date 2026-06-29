@@ -10,7 +10,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from pytestqt.plugin import QtBot
 
 from gui.tolerance_editor.tolerance_editor_widget import ToleranceEditorWidget
 from persistence.schema import (

@@ -530,7 +530,6 @@ class RunPanelWidget(QWidget):
         seed = self._seed_spin.value()
 
         ik_targets = None
-        objective = None
         max_iter = 30
 
         if mode == "ik_allocation":

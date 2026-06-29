@@ -341,7 +341,6 @@ def plot_pareto_sensitivity(
         va="bottom",
     )
 
-    ax.set_xlabel("% of total output variance")
     return ax
 
 

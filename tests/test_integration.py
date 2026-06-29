@@ -105,7 +105,7 @@ class TestTwoEdgeTranslationEndToEnd:
             np.testing.assert_allclose(box[label]["min"], 0.0, atol=DEFAULT_ATOL)
             np.testing.assert_allclose(box[label]["max"], 0.0, atol=DEFAULT_ATOL)
 
-    def test_error_is_zero_at_intermediate_frame_B(self):
+    def test_dx_error_propagates_to_intermediate_frame_B(self):
         """dx delta on root→B appears at B; B→C has zero delta so C's error = B's error."""
         fg = self._build([0.003, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0])
         td = MonteCarloFKEngine.run(fg, n_trials=5, seed=0)

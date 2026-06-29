@@ -16,6 +16,7 @@ from gui.graph_editor.add_edge_dialog import AddEdgeDialog
 from gui.graph_editor.add_frame_dialog import AddFrameDialog
 from gui.graph_editor.edit_edge_dialog import EditEdgeDialog
 from gui.graph_editor.frame_edge_tree import FrameEdgeTree
+from gui.graph_editor.graph_editor_widget import GraphEditorWidget
 from gui.graph_editor.htm_entry_widget import HTMEntryWidget
 from gui.main_window import MainWindow, _empty_project
 from persistence.schema import (
@@ -299,8 +300,7 @@ def test_edit_edge_accept_updates_edge_in_project(qtbot):
     edge = _make_edge("old_name", "A", "B")
     project.edges.append(edge)
 
-    widget = __import__("gui.graph_editor.graph_editor_widget",
-                        fromlist=["GraphEditorWidget"]).GraphEditorWidget()
+    widget = GraphEditorWidget()
     qtbot.addWidget(widget)
     widget.set_project(project)
 
