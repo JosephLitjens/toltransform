@@ -65,8 +65,6 @@ class _DofRow:
     """
 
     def __init__(self, grid: QGridLayout, grid_row: int, dof_name: str) -> None:
-        self._loading = False
-
         # Col 0 — DoF label
         lbl = QLabel(f"<b>{dof_name}</b>")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)

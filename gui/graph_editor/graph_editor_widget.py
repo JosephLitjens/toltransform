@@ -84,7 +84,7 @@ class GraphEditorWidget(QWidget):
         if is_edge:
             self.edge_selected.emit(info[0])
 
-    def _on_item_double_clicked(self, item, col: int) -> None:
+    def _on_item_double_clicked(self, item, _col: int) -> None:
         info = self._tree.selected_item_info()
         if info is not None and info[1] == "edge":
             self._on_edit_edge()

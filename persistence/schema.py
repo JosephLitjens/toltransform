@@ -323,7 +323,7 @@ def _htm_to_model(htm: HTM) -> HTMInputModel:
 def _model_to_htm(model: HTMInputModel) -> HTM:
     """Reconstruct a live HTM from its Pydantic input-representation model."""
     if model.kind == "xyz_euler":
-        return HTM.from_xyz_euler(model.xyz, model.euler_angles, model.convention)
+        return HTM.from_xyz_euler(model.xyz, model.euler_angles)
     elif model.kind == "matrix":
         return HTM.from_matrix(np.array(model.matrix))
     elif model.kind == "quaternion":

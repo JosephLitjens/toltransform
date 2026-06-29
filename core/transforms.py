@@ -15,9 +15,6 @@ import numpy as np
 
 from core import conversions
 
-# Locked convention — single definition, referenced by all methods.
-_EULER_CONVENTION = "intrinsic_zyx"
-
 _BOTTOM_ROW = np.array([0.0, 0.0, 0.0, 1.0])
 _BOTTOM_ROW_TOL = 1e-9
 _ORTHO_TOL = 1e-6
@@ -73,28 +70,17 @@ class HTM:
         cls,
         xyz: np.ndarray,
         euler_angles: np.ndarray,
-        convention: str = _EULER_CONVENTION,
     ) -> HTM:
-        """Construct from a translation vector and intrinsic ZYX Euler angles.
-
-        Parameters
-        ----------
-        xyz : array-like, shape (3,)
-            Translation [x, y, z].
-        euler_angles : array-like, shape (3,)
-            [ez, ey, ex] in radians — yaw (Z), pitch (Y'), roll (X'').
-        convention : str
-            Must be "intrinsic_zyx".
-        """
+        """Construct from a translation vector and intrinsic ZYX Euler angles [ez, ey, ex] in radians."""
         xyz = np.asarray(xyz, dtype=float)
         euler_angles = np.asarray(euler_angles, dtype=float)
-        R = conversions.euler_to_rotation_matrix(euler_angles, convention=convention)
+        R = conversions.euler_to_rotation_matrix(euler_angles)
         T = _build_htm(R, xyz)
         return cls(
             T,
             {
                 "kind": "xyz_euler",
-                "raw_params": {"xyz": xyz.copy(), "euler_angles": euler_angles.copy(), "convention": convention},
+                "raw_params": {"xyz": xyz.copy(), "euler_angles": euler_angles.copy()},
             },
         )
 
@@ -177,19 +163,11 @@ class HTM:
 
     # ── Converters ──────────────────────────────────────────────────────────
 
-    def to_xyz_euler(
-        self, convention: str = _EULER_CONVENTION
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Return (xyz, euler_angles) — round-trip independent of construction form.
-
-        Returns
-        -------
-        xyz : np.ndarray, shape (3,)
-        euler_angles : np.ndarray, shape (3,) — [ez, ey, ex] in radians
-        """
+    def to_xyz_euler(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return (xyz, euler_angles) — xyz shape (3,), euler [ez, ey, ex] in radians."""
         R = self._matrix[:3, :3]
         xyz = self._matrix[:3, 3].copy()
-        euler = conversions.rotation_matrix_to_euler(R, convention=convention)
+        euler = conversions.rotation_matrix_to_euler(R)
         return xyz, euler
 
     def to_quaternion(self) -> tuple[np.ndarray, np.ndarray]:

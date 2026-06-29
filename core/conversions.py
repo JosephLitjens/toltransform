@@ -36,46 +36,15 @@ _ZERO_ANGLE_TOL = 1e-12
 
 # ── Euler ────────────────────────────────────────────────────────────────────
 
-def euler_to_rotation_matrix(
-    euler_angles: np.ndarray,
-    convention: str = "intrinsic_zyx",
-) -> np.ndarray:
-    """Return 3x3 rotation matrix from Euler angles.
-
-    Parameters
-    ----------
-    euler_angles : array-like, shape (3,)
-        Angles [ez, ey, ex] in radians (intrinsic ZYX = yaw-pitch-roll).
-    convention : str
-        Must be "intrinsic_zyx" (the only supported convention).
-    """
-    if convention != "intrinsic_zyx":
-        raise ValueError(
-            f"Unsupported Euler convention '{convention}'. "
-            "Only 'intrinsic_zyx' is supported."
-        )
+def euler_to_rotation_matrix(euler_angles: np.ndarray) -> np.ndarray:
+    """Return 3x3 rotation matrix from Euler angles [ez, ey, ex] in radians (intrinsic ZYX)."""
     e = np.asarray(euler_angles, dtype=float)
     # i=2(Z), j=1(Y), k=0(X), extrinsic=False → intrinsic ZYX
     return _pr.matrix_from_euler(e, i=2, j=1, k=0, extrinsic=False)
 
 
-def rotation_matrix_to_euler(
-    R: np.ndarray,
-    convention: str = "intrinsic_zyx",
-) -> np.ndarray:
-    """Return Euler angles [ez, ey, ex] in radians from a 3x3 rotation matrix.
-
-    Parameters
-    ----------
-    R : array-like, shape (3, 3)
-    convention : str
-        Must be "intrinsic_zyx".
-    """
-    if convention != "intrinsic_zyx":
-        raise ValueError(
-            f"Unsupported Euler convention '{convention}'. "
-            "Only 'intrinsic_zyx' is supported."
-        )
+def rotation_matrix_to_euler(R: np.ndarray) -> np.ndarray:
+    """Return Euler angles [ez, ey, ex] in radians from a 3x3 rotation matrix (intrinsic ZYX)."""
     # i=2(Z), j=1(Y), k=0(X), extrinsic=False → intrinsic ZYX
     return _pr.euler_from_matrix(np.asarray(R, dtype=float), i=2, j=1, k=0, extrinsic=False)
 
