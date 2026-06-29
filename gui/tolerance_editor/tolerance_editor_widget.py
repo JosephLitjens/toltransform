@@ -36,83 +36,210 @@ from core.tolerance import ToleranceSpec
 from persistence.schema import ProjectModel, ToleranceSpecModel
 
 _DOF_NAMES = ("dx", "dy", "dz", "rx", "ry", "rz")
-_GRID_HEADERS = ("DoF", "Distribution", "Bound", "σ-level", "Locked", "")
+# 7 columns: DoF | Mode | Distribution | Bound/Range | σ-level | Locked | Error
+_GRID_HEADERS = ("DoF", "", "Distribution", "Bound / Range", "σ-level", "Locked", "")
+
+_SPIN_STEP = 0.0001
+_SPIN_DECIMALS = 6
+
+
+def _make_bound_spin(minimum: float = 0.0) -> QDoubleSpinBox:
+    s = QDoubleSpinBox()
+    s.setRange(minimum, 9999.0)
+    s.setDecimals(_SPIN_DECIMALS)
+    s.setSingleStep(_SPIN_STEP)
+    return s
 
 
 class _DofRow:
     """Controls for one DoF within the tolerance editor grid.
 
     Not a QWidget — widgets are added directly to the parent QGridLayout.
+
+    Two input modes (toggled per-row):
+      Symmetric (±):   one bound spinbox, samples from [-bound, +bound].
+      Asymmetric (↔):  two spinboxes (lower, upper), samples from [lower, upper].
+
+    When switching ± → ↔ the lower/upper spinboxes are pre-populated from ±bound.
+    When switching ↔ → ± the bound spinbox is set to max(|lower|, |upper|).
     """
 
     def __init__(self, grid: QGridLayout, grid_row: int, dof_name: str) -> None:
         self._loading = False
 
+        # Col 0 — DoF label
         lbl = QLabel(f"<b>{dof_name}</b>")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(lbl, grid_row, 0)
 
+        # Col 1 — Mode toggle button
+        self.mode_btn = QPushButton("±")
+        self.mode_btn.setCheckable(True)
+        self.mode_btn.setChecked(False)   # False = symmetric (±)
+        self.mode_btn.setFixedWidth(38)
+        self.mode_btn.setToolTip(
+            "Toggle between symmetric ±bound and asymmetric min/max mode.\n"
+            "Asymmetric mode is for FK only; IK targets stay ±."
+        )
+        grid.addWidget(self.mode_btn, grid_row, 1)
+
+        # Col 2 — Distribution combo
         self.dist_combo = QComboBox()
         self.dist_combo.addItems(["uniform", "normal"])
         self.dist_combo.setMinimumWidth(90)
-        grid.addWidget(self.dist_combo, grid_row, 1)
+        grid.addWidget(self.dist_combo, grid_row, 2)
 
-        self.bound_spin = QDoubleSpinBox()
-        self.bound_spin.setRange(0.0, 9999.0)
-        self.bound_spin.setDecimals(6)
-        self.bound_spin.setSingleStep(0.0001)
-        grid.addWidget(self.bound_spin, grid_row, 2)
+        # Col 3 — Stacked: page 0 = bound spinbox, page 1 = lower+upper
+        self._bound_stack = QStackedWidget()
 
+        self.bound_spin = _make_bound_spin(minimum=0.0)
+        self._bound_stack.addWidget(self.bound_spin)
+
+        asym_widget = QWidget()
+        asym_layout = QHBoxLayout(asym_widget)
+        asym_layout.setContentsMargins(0, 0, 0, 0)
+        asym_layout.setSpacing(4)
+        self.lower_spin = _make_bound_spin(minimum=-9999.0)
+        self.lower_spin.setToolTip("Lower bound (min)")
+        self.upper_spin = _make_bound_spin(minimum=-9999.0)
+        self.upper_spin.setToolTip("Upper bound (max)")
+        lower_lbl = QLabel("min")
+        lower_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        upper_lbl = QLabel("max")
+        upper_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        asym_layout.addWidget(lower_lbl)
+        asym_layout.addWidget(self.lower_spin)
+        asym_layout.addWidget(upper_lbl)
+        asym_layout.addWidget(self.upper_spin)
+        self._bound_stack.addWidget(asym_widget)
+
+        grid.addWidget(self._bound_stack, grid_row, 3)
+
+        # Col 4 — σ-level
         self.sigma_spin = QDoubleSpinBox()
         self.sigma_spin.setRange(0.001, 99.0)
         self.sigma_spin.setDecimals(3)
         self.sigma_spin.setValue(3.0)
         self.sigma_spin.setEnabled(False)
         self.sigma_spin.setStyleSheet("color: gray;")
-        grid.addWidget(self.sigma_spin, grid_row, 3)
+        grid.addWidget(self.sigma_spin, grid_row, 4)
 
+        # Col 5 — Locked checkbox
         self.locked_check = QCheckBox()
-        grid.addWidget(self.locked_check, grid_row, 4, Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(self.locked_check, grid_row, 5, Qt.AlignmentFlag.AlignCenter)
 
+        # Col 6 — Inline error label
         self.error_label = QLabel()
         self.error_label.setStyleSheet("color: red; font-size: 11px;")
         self.error_label.setWordWrap(True)
-        grid.addWidget(self.error_label, grid_row, 5)
+        grid.addWidget(self.error_label, grid_row, 6)
 
         self.dist_combo.currentTextChanged.connect(self._on_dist_changed)
+        self.mode_btn.clicked.connect(self._on_mode_toggled)
+
+    # ── Properties ────────────────────────────────────────────────────────────
+
+    @property
+    def is_asymmetric(self) -> bool:
+        return self.mode_btn.isChecked()
+
+    # ── Internal handlers ─────────────────────────────────────────────────────
 
     def _on_dist_changed(self, dist: str) -> None:
         is_normal = dist == "normal"
         self.sigma_spin.setEnabled(is_normal)
         self.sigma_spin.setStyleSheet("" if is_normal else "color: gray;")
 
+    def _on_mode_toggled(self, checked: bool) -> None:
+        if checked:
+            # Switching to asymmetric: pre-populate lower/upper from ±bound
+            b = self.bound_spin.value()
+            self.lower_spin.blockSignals(True)
+            self.upper_spin.blockSignals(True)
+            self.lower_spin.setValue(-b)
+            self.upper_spin.setValue(b)
+            self.lower_spin.blockSignals(False)
+            self.upper_spin.blockSignals(False)
+            self._bound_stack.setCurrentIndex(1)
+            self.mode_btn.setText("↔")
+        else:
+            # Switching to symmetric: set bound = max(|lower|, |upper|)
+            b = max(abs(self.lower_spin.value()), abs(self.upper_spin.value()))
+            self.bound_spin.blockSignals(True)
+            self.bound_spin.setValue(b)
+            self.bound_spin.blockSignals(False)
+            self._bound_stack.setCurrentIndex(0)
+            self.mode_btn.setText("±")
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
     def load(self, spec: ToleranceSpecModel) -> None:
-        for w in (self.dist_combo, self.bound_spin, self.sigma_spin, self.locked_check):
+        """Populate row from a ToleranceSpecModel (either symmetric or asymmetric)."""
+        all_widgets = (
+            self.dist_combo, self.bound_spin, self.lower_spin,
+            self.upper_spin, self.sigma_spin, self.locked_check, self.mode_btn,
+        )
+        for w in all_widgets:
             w.blockSignals(True)
+
         self.dist_combo.setCurrentText(spec.distribution)
-        self.bound_spin.setValue(spec.bound)
         self.sigma_spin.setValue(spec.sigma_level)
         self.locked_check.setChecked(spec.locked)
         self._on_dist_changed(spec.distribution)
-        for w in (self.dist_combo, self.bound_spin, self.sigma_spin, self.locked_check):
+
+        if spec.lower is not None and spec.upper is not None:
+            self.lower_spin.setValue(spec.lower)
+            self.upper_spin.setValue(spec.upper)
+            self.bound_spin.setValue(spec.bound)
+            self._bound_stack.setCurrentIndex(1)
+            self.mode_btn.setChecked(True)
+            self.mode_btn.setText("↔")
+        else:
+            self.bound_spin.setValue(spec.bound)
+            self._bound_stack.setCurrentIndex(0)
+            self.mode_btn.setChecked(False)
+            self.mode_btn.setText("±")
+
+        for w in all_widgets:
             w.blockSignals(False)
         self.error_label.setText("")
 
     def get_model(self) -> ToleranceSpecModel:
+        """Return the current ToleranceSpecModel from widget state."""
+        dist = self.dist_combo.currentText()
+        sigma = self.sigma_spin.value()
+        locked = self.locked_check.isChecked()
+        if self.is_asymmetric:
+            lo, hi = self.lower_spin.value(), self.upper_spin.value()
+            bound = max(abs(lo), abs(hi))
+            return ToleranceSpecModel(
+                distribution=dist, bound=bound,
+                sigma_level=sigma, locked=locked,
+                lower=lo, upper=hi,
+            )
         return ToleranceSpecModel(
-            distribution=self.dist_combo.currentText(),
+            distribution=dist,
             bound=self.bound_spin.value(),
-            sigma_level=self.sigma_spin.value(),
-            locked=self.locked_check.isChecked(),
+            sigma_level=sigma,
+            locked=locked,
         )
 
     def is_valid(self) -> bool:
+        """Validate current widget state using ToleranceSpec as the validator."""
         try:
-            ToleranceSpec(
-                distribution=self.dist_combo.currentText(),
-                bound=self.bound_spin.value(),
-                sigma_level=self.sigma_spin.value(),
-            )
+            if self.is_asymmetric:
+                lo, hi = self.lower_spin.value(), self.upper_spin.value()
+                ToleranceSpec(
+                    distribution=self.dist_combo.currentText(),
+                    sigma_level=self.sigma_spin.value(),
+                    lower=lo, upper=hi,
+                )
+            else:
+                ToleranceSpec(
+                    distribution=self.dist_combo.currentText(),
+                    bound=self.bound_spin.value(),
+                    sigma_level=self.sigma_spin.value(),
+                )
             self.error_label.setText("")
             return True
         except ValueError as exc:
@@ -122,8 +249,11 @@ class _DofRow:
     def connect_changed(self, slot) -> None:
         self.dist_combo.currentTextChanged.connect(slot)
         self.bound_spin.valueChanged.connect(slot)
+        self.lower_spin.valueChanged.connect(slot)
+        self.upper_spin.valueChanged.connect(slot)
         self.sigma_spin.valueChanged.connect(slot)
         self.locked_check.stateChanged.connect(slot)
+        self.mode_btn.clicked.connect(slot)
 
 
 class ToleranceEditorWidget(QWidget):
@@ -216,7 +346,7 @@ class ToleranceEditorWidget(QWidget):
 
         # Column header row
         grid = QGridLayout()
-        grid.setColumnStretch(5, 1)
+        grid.setColumnStretch(6, 1)
         for col, header in enumerate(_GRID_HEADERS):
             lbl = QLabel(f"<b>{header}</b>")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)

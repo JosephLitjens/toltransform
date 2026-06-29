@@ -38,11 +38,19 @@ from core.transforms import HTM
 # ── Tolerance models ──────────────────────────────────────────────────────────
 
 class ToleranceSpecModel(BaseModel):
-    """JSON-serializable form of core.tolerance.ToleranceSpec."""
+    """JSON-serializable form of core.tolerance.ToleranceSpec.
+
+    Two mutually exclusive modes:
+      Symmetric:   bound is the ±half-width; lower and upper are None.
+      Asymmetric:  lower and upper are both set; bound holds the auto-derived
+                   conservative value max(|lower|, |upper|) for IK compatibility.
+    """
     distribution: Literal["uniform", "normal"]
     bound: float
     sigma_level: float = 3.0
     locked: bool = False
+    lower: float | None = None
+    upper: float | None = None
 
     @field_validator("bound")
     @classmethod
@@ -50,6 +58,20 @@ class ToleranceSpecModel(BaseModel):
         if v < 0:
             raise ValueError(f"bound must be >= 0; got {v}")
         return v
+
+    @model_validator(mode="after")
+    def validate_asymmetric_fields(self) -> "ToleranceSpecModel":
+        has_lower = self.lower is not None
+        has_upper = self.upper is not None
+        if has_lower != has_upper:
+            raise ValueError(
+                "ToleranceSpecModel: lower and upper must be set together."
+            )
+        if has_lower and has_upper and self.lower >= self.upper:  # type: ignore[operator]
+            raise ValueError(
+                f"ToleranceSpecModel: lower ({self.lower}) must be < upper ({self.upper})."
+            )
+        return self
 
 
 class ToleranceSpec6Model(BaseModel):
@@ -192,6 +214,8 @@ def _tol_to_model(spec: ToleranceSpec) -> ToleranceSpecModel:
         bound=spec.bound,
         sigma_level=spec.sigma_level,
         locked=spec.locked,
+        lower=spec.lower,
+        upper=spec.upper,
     )
 
 
@@ -207,6 +231,14 @@ def _tol6_to_model(tol6: ToleranceSpec6) -> ToleranceSpec6Model:
 
 
 def _model_to_tol(model: ToleranceSpecModel) -> ToleranceSpec:
+    if model.lower is not None and model.upper is not None:
+        return ToleranceSpec(
+            distribution=model.distribution,
+            sigma_level=model.sigma_level,
+            locked=model.locked,
+            lower=model.lower,
+            upper=model.upper,
+        )
     return ToleranceSpec(
         distribution=model.distribution,
         bound=model.bound,

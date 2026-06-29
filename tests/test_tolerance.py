@@ -92,6 +92,109 @@ class TestToleranceSpec6:
         np.testing.assert_allclose(empirical_sigma, expected_sigma, rtol=0.01)
 
 
+# ── Asymmetric ToleranceSpec ──────────────────────────────────────────────────
+
+class TestAsymmetricToleranceSpec:
+    def test_valid_asymmetric_construction(self):
+        spec = ToleranceSpec("uniform", lower=-0.002, upper=0.005)
+        assert spec.is_asymmetric
+        assert spec.lower == -0.002
+        assert spec.upper == 0.005
+        # bound auto-derived as max(|lower|, |upper|)
+        assert spec.bound == pytest.approx(0.005)
+
+    def test_asymmetric_bound_derived_from_larger_abs(self):
+        # |lower| > |upper|: bound should equal |lower|
+        spec = ToleranceSpec("uniform", lower=-0.010, upper=0.003)
+        assert spec.bound == pytest.approx(0.010)
+
+    def test_only_lower_raises(self):
+        with pytest.raises(ValueError, match="lower and upper must be set together"):
+            ToleranceSpec("uniform", lower=-0.001)
+
+    def test_only_upper_raises(self):
+        with pytest.raises(ValueError, match="lower and upper must be set together"):
+            ToleranceSpec("uniform", upper=0.001)
+
+    def test_lower_equal_upper_raises(self):
+        with pytest.raises(ValueError, match="lower.*<.*upper"):
+            ToleranceSpec("uniform", lower=0.001, upper=0.001)
+
+    def test_lower_greater_than_upper_raises(self):
+        with pytest.raises(ValueError, match="lower.*<.*upper"):
+            ToleranceSpec("uniform", lower=0.002, upper=0.001)
+
+    def test_symmetric_spec_is_not_asymmetric(self):
+        spec = ToleranceSpec("uniform", bound=0.005)
+        assert not spec.is_asymmetric
+
+    def test_asymmetric_uniform_samples_in_range(self):
+        lo, hi = -0.002, 0.005
+        spec = ToleranceSpec("uniform", lower=lo, upper=hi)
+        samples = spec.sample(50_000, np.random.default_rng(20))
+        assert np.all(samples >= lo)
+        assert np.all(samples <= hi)
+
+    def test_asymmetric_uniform_empirical_mean(self):
+        lo, hi = -0.002, 0.005
+        spec = ToleranceSpec("uniform", lower=lo, upper=hi)
+        samples = spec.sample(200_000, np.random.default_rng(21))
+        expected_mean = (lo + hi) / 2.0
+        assert np.mean(samples) == pytest.approx(expected_mean, abs=1e-4)
+
+    def test_asymmetric_normal_mean_at_midpoint(self):
+        lo, hi = -0.001, 0.003
+        spec = ToleranceSpec("normal", lower=lo, upper=hi, sigma_level=3.0)
+        samples = spec.sample(200_000, np.random.default_rng(22))
+        expected_mean = (lo + hi) / 2.0
+        assert np.mean(samples) == pytest.approx(expected_mean, abs=1e-4)
+
+    def test_asymmetric_normal_empirical_sigma(self):
+        lo, hi = -0.001, 0.003
+        sigma_level = 3.0
+        expected_sigma = (hi - lo) / 2.0 / sigma_level
+        spec = ToleranceSpec("normal", lower=lo, upper=hi, sigma_level=sigma_level)
+        samples = spec.sample(200_000, np.random.default_rng(23))
+        assert np.std(samples) == pytest.approx(expected_sigma, rel=0.02)
+
+
+class TestToleranceSpecVariance:
+    def test_symmetric_uniform_variance(self):
+        b = 0.006
+        spec = ToleranceSpec("uniform", bound=b)
+        assert spec.variance == pytest.approx(b**2 / 3.0)
+
+    def test_symmetric_normal_variance(self):
+        b, k = 0.009, 3.0
+        spec = ToleranceSpec("normal", bound=b, sigma_level=k)
+        assert spec.variance == pytest.approx((b / k) ** 2)
+
+    def test_asymmetric_uniform_variance_symmetric_case(self):
+        # When lower=-b, upper=+b the asymmetric formula must match b²/3 exactly
+        b = 0.004
+        spec = ToleranceSpec("uniform", lower=-b, upper=b)
+        assert spec.variance == pytest.approx(b**2 / 3.0)
+
+    def test_asymmetric_uniform_variance_off_centre(self):
+        # Uniform[-0.001, 0.003]: E[X] = 0.001, Var = (0.004)²/12
+        lo, hi = -0.001, 0.003
+        spec = ToleranceSpec("uniform", lower=lo, upper=hi)
+        mean = (lo + hi) / 2.0
+        var = (hi - lo) ** 2 / 12.0
+        assert spec.variance == pytest.approx(var + mean**2)
+
+    def test_asymmetric_normal_variance_off_centre(self):
+        lo, hi, k = -0.001, 0.003, 3.0
+        spec = ToleranceSpec("normal", lower=lo, upper=hi, sigma_level=k)
+        mean = (lo + hi) / 2.0
+        sigma = (hi - lo) / 2.0 / k
+        assert spec.variance == pytest.approx(sigma**2 + mean**2)
+
+    def test_zero_bound_variance_is_zero(self):
+        spec = ToleranceSpec("uniform", bound=0.0)
+        assert spec.variance == 0.0
+
+
 # ── locked flag must NOT suppress sampling ────────────────────────────────────
 
 class TestLockedFlagDoesNotSuppressSampling:
