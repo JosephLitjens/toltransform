@@ -289,6 +289,7 @@ class ResultsViewerWidget(QWidget):
         fig = generate_frame_report(self._trial_data, frame_name)
         win = _FigureWindow(fig, f"Frame Report: {frame_name}")
         self._open_windows.append(win)
+        win.destroyed.connect(lambda: self._open_windows.remove(win) if win in self._open_windows else None)
         win.show()
 
     # ── IK display ─────────────────────────────────────────────────────────────
@@ -477,6 +478,7 @@ class ResultsViewerWidget(QWidget):
             fig = generate_sensitivity_report(report)
             win = _FigureWindow(fig, f"Pareto Sensitivity: {frame_a} → {frame_b}")
             self._open_windows.append(win)
+            win.destroyed.connect(lambda: self._open_windows.remove(win) if win in self._open_windows else None)
             win.show()
             self._pareto_status_label.setText("")
         except Exception as exc:
