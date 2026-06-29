@@ -120,6 +120,7 @@ class LoosestAllocation:
         sensitivity_matrix: np.ndarray,
         target_tolerance: ToleranceSpec6,
         free_edges: list,
+        locked_budget: np.ndarray | None = None,
     ) -> dict[str, ToleranceSpec6]:
         J = sensitivity_matrix
         N = len(free_edges)
@@ -127,13 +128,19 @@ class LoosestAllocation:
         free_mask = _build_free_mask(free_edges, N)
         free_idx = np.where(free_mask)[0]
 
-        # Build active output-DoF constraints using only free-variable columns
+        if locked_budget is None:
+            locked_budget = np.zeros(6)
+
+        # Build active output-DoF constraints using only free-variable columns.
+        # b_eff subtracts the worst-case contribution of locked DoFs so the NLP
+        # allocates free bounds against the remaining available budget only.
         A_rows, b_vals = [], []
         for k in range(6):
             row_free = np.abs(J[k, free_idx])
-            if row_free.sum() > 0.0 and target_tolerance[k].bound > 0.0:
+            b_eff = max(0.0, target_tolerance[k].bound - locked_budget[k])
+            if row_free.sum() > 0.0 and b_eff > 0.0:
                 A_rows.append(row_free)
-                b_vals.append(target_tolerance[k].bound)
+                b_vals.append(b_eff)
 
         if not A_rows:
             # No active constraints — return equal allocation as a safe default
@@ -460,6 +467,52 @@ def _combine_validation_reports(
     )
 
 
+def _compute_locked_budget(
+    frame_graph: FrameGraph,
+    frame_a: str,
+    frame_b: str,
+    path: list,
+    free_edges: list,
+    J_free: np.ndarray,
+) -> np.ndarray:
+    """Worst-case contribution of locked DoFs to each of the 6 output DoFs.
+
+    Returns a (6,) array that the NLP can subtract from its target budget,
+    ensuring free DoFs are not allocated more than the target minus the
+    fixed contribution of locked DoFs.
+
+    Covers two classes:
+    - Locked DoF within partially-free edges: present in J_free but excluded
+      from free_mask, so their columns appear in J_free but not in free_idx.
+    - Fully-locked edges: absent from J_free entirely; handled by a separate
+      compute_sensitivity call.
+    """
+    locked_budget = np.zeros(6)
+
+    # Class 1 — locked DoF within free edges (columns ARE in J_free)
+    for i, edge in enumerate(free_edges):
+        for j in range(6):
+            spec = edge.tolerance[j]
+            if spec.locked and spec.bound > 0.0:
+                locked_budget += np.abs(J_free[:, 6 * i + j]) * spec.bound
+
+    # Class 2 — fully-locked path edges (not in J_free at all)
+    free_names = {e.name for e in free_edges}
+    all_path_edges = [e for e, _ in path]
+    fully_locked = [e for e in all_path_edges if e.name not in free_names]
+    if fully_locked:
+        J_fl = compute_sensitivity(
+            frame_graph, frame_a, frame_b, [e.name for e in fully_locked]
+        )
+        for i, edge in enumerate(fully_locked):
+            for j in range(6):
+                spec = edge.tolerance[j]
+                if spec.bound > 0.0:
+                    locked_budget += np.abs(J_fl[:, 6 * i + j]) * spec.bound
+
+    return locked_budget
+
+
 # ── AllocationEngine ──────────────────────────────────────────────────────────
 
 class AllocationEngine:
@@ -504,7 +557,10 @@ class AllocationEngine:
 
         free_edge_names = [e.name for e in free_edges]
         J = compute_sensitivity(frame_graph, frame_a, frame_b, free_edge_names)
-        return LoosestAllocation().solve(J, target_tolerance, free_edges)
+        locked_budget = _compute_locked_budget(
+            frame_graph, frame_a, frame_b, path, free_edges, J
+        )
+        return LoosestAllocation().solve(J, target_tolerance, free_edges, locked_budget=locked_budget)
 
     @staticmethod
     def validate(
@@ -642,9 +698,11 @@ class AllocationEngine:
         all_free_edges: list = []
         seen_names: set[str] = set()
         pair_free: list[list] = []
+        pair_paths: list[list] = []  # parallel to pair_free — stored for locked-budget calc
         for frame_a, frame_b, _ in targets:
             path = frame_graph.path_edges_between(frame_a, frame_b)
             p_free = [e for e, _ in path if not all(e.tolerance[j].locked for j in range(6))]
+            pair_paths.append(path)
             pair_free.append(p_free)
             for edge in p_free:
                 if edge.name not in seen_names:
@@ -663,11 +721,15 @@ class AllocationEngine:
         A_rows: list[np.ndarray] = []
         b_vals: list[float] = []
 
-        for (frame_a, frame_b, target), p_free_edges in zip(targets, pair_free):
+        for (frame_a, frame_b, target), p_free_edges, path in zip(targets, pair_free, pair_paths):
             if not p_free_edges:
                 continue
             p_names = [e.name for e in p_free_edges]
             J_compact = compute_sensitivity(frame_graph, frame_a, frame_b, p_names)
+
+            pair_locked_budget = _compute_locked_budget(
+                frame_graph, frame_a, frame_b, path, p_free_edges, J_compact
+            )
 
             J_full = np.zeros((6, 6 * N_total))
             for local_i, name in enumerate(p_names):
@@ -676,9 +738,10 @@ class AllocationEngine:
 
             for k in range(6):
                 row_free = np.abs(J_full[k, free_idx_global])
-                if row_free.sum() > 0.0 and target[k].bound > 0.0:
+                b_eff = max(0.0, target[k].bound - pair_locked_budget[k])
+                if row_free.sum() > 0.0 and b_eff > 0.0:
                     A_rows.append(row_free)
-                    b_vals.append(target[k].bound)
+                    b_vals.append(b_eff)
 
         if not A_rows:
             # All constraints inactive — equal-allocate from the tightest target bound.
