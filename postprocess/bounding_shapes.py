@@ -32,6 +32,10 @@ import numpy as np
 from scipy.stats import chi2
 
 
+_DEGENERATE_AXIS_TOL = 1e-10   # rotation-vector magnitude below which an axis is treated as zero
+_DEGENERATE_SIGMA_TOL = 1e-15  # ellipsoid axis length below which sigma is treated as degenerate
+
+
 # ── private helpers ───────────────────────────────────────────────────────────
 
 def _check_rotvec_shape(arr: np.ndarray, fname: str) -> None:
@@ -159,7 +163,7 @@ def fit_bounding_ellipsoid(points: np.ndarray, coverage: float = 1.0) -> dict:
         # Scale the covariance-shape ellipsoid uniformly so all points are inside.
         # Ellipsoidal coordinate r²_i = Σ_j (proj[i,j]/σ_j)²; we need r_max ≤ 1.
         # Use σ_safe=1 for degenerate axes (σ≈0 ↔ proj≈0, so they contribute ~0).
-        sigma_safe = np.where(sigma > 1e-15, sigma, 1.0)
+        sigma_safe = np.where(sigma > _DEGENERATE_SIGMA_TOL, sigma, 1.0)
         r_sq = np.sum((projections / sigma_safe[np.newaxis, :]) ** 2, axis=1)
         uniform_scale = float(np.sqrt(np.max(r_sq))) if len(points) > 1 else 0.0
         axes_lengths = sigma * uniform_scale
@@ -208,14 +212,14 @@ def fit_rotation_cone(rotvecs: np.ndarray) -> dict:
     angles = np.linalg.norm(rotvecs, axis=1)    # θ for each trial, shape (N,)
     max_angle = float(np.max(angles))
 
-    nonzero_mask = angles > 1e-10
+    nonzero_mask = angles > _DEGENERATE_AXIS_TOL
     if not np.any(nonzero_mask):
         mean_axis = np.array([0.0, 0.0, 1.0])
     else:
         unit_axes = rotvecs[nonzero_mask] / angles[nonzero_mask, np.newaxis]
         mean_dir = np.mean(unit_axes, axis=0)
         norm = np.linalg.norm(mean_dir)
-        mean_axis = mean_dir / norm if norm > 1e-10 else np.array([0.0, 0.0, 1.0])
+        mean_axis = mean_dir / norm if norm > _DEGENERATE_AXIS_TOL else np.array([0.0, 0.0, 1.0])
 
     return {"max_angle": max_angle, "mean_axis": mean_axis}
 

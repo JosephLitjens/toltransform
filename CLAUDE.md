@@ -60,13 +60,14 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** Post-milestone enhancements — **COMPLETE ✅**. All changes merged to `main` and pushed.
-- **Last completed task (this session, 2026-06-28 evening):** Three items implemented on `feature/asymmetric-tolerances`, merged to `main`:
-  1. **Asymmetric tolerance bounds** (`lower`/`upper` format for FK mode): `core/tolerance.py`, `core/sampling.py`, `persistence/schema.py`, `postprocess/stats.py`, `gui/tolerance_editor/`. 49 new tests. IK remains symmetric-only.
-  2. **NameError bug fix** in `allocate_multi` non-convergence path: stale `method_name` variable replaced with `"LoosestAllocation"`. Regression test added.
-  3. **IK convergence fix with asymmetric locked DoFs**: NLP budget in `LoosestAllocation.solve()` now subtracts worst-case locked DoF contributions (`_compute_locked_budget` helper). Prevents systematic over-allocation when locked DoFs have non-zero bounds. Fix applied to both `solve()` and `solve_multi()`. Regression test added.
-- **Suite: 270 passed** (non-GUI). Full suite (including GUI): 302 passed.
-- **Next task:** None — all planned milestones complete. See `docs/design_spec.md` Section 7.6 for deferred/future ideas.
+- **Current milestone:** Codebase cleanup — branch `fix/codebase-cleanup` in progress (not yet merged to main).
+- **Suite: 373 passed** (full suite including GUI).
+- **Next task:** Finalize remaining cleanup items (see branch), get user approval, then merge to main.
+
+**Recent history (merged to main as of 2026-06-29):**
+- `feature/apply-allocation-persist-ik-params` (commit `f5a3a33`): Apply Allocation button + persist IK params.
+- `feature/asymmetric-tolerances`: Asymmetric tolerance bounds + NameError fix + locked-DoF budget fix.
+- All milestones A → B-1 → B-2 → C → D complete.
 
 **✅ Multi-pair IK allocation complete (merged to main 2026-06-28):**
 - `AllocationEngine.solve_multi(fg, targets)` — builds stacked padded Jacobian `A ∈ ℝ^{C × n_free}` from all P pairs' paths; calls `LoosestAllocation._run_nlp(A, b)` to find globally-consistent per-DoF bounds. Shared edges appear in multiple constraint rows and are automatically constrained by the tightest binding pair.
@@ -148,32 +149,3 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 - Adjoint formula: `[[R, skew(t)@R],[0,R]]` — NOT `[[R,0],[skew(t)@R,R]]`
 - Sensitivity formula: `J_i = Ad_{T_{frame_a→exit_i}}` — NOT `Ad_{T_{exit→frame_b}}`
 
-**Key facts for the B-2 session:**
-
-**Repository state (all pushed to origin/main as of 2026-06-26):**
-- `git log origin/main..HEAD` should show nothing — all B1 commits pushed (`eabd3f3` is HEAD).
-- Suite: **223 passed, 1 skipped** (the skipped test is `test_allocation_mc_validation_discrepancy` in `tests/test_allocation.py` — the placeholder that B2-3 will replace with real tests).
-
-**Files B-2 touches:**
-- `sim/allocation.py` — currently a **zero-byte empty file**. This is the primary B-2 deliverable.
-- `tests/test_allocation.py` — currently has 1 `pytest.mark.skip` placeholder. Replace with real tests in B2-3 (do not delete the file — add to it, then remove the placeholder once the real tests exist).
-
-**What already exists that B-2 depends on (all implemented and tested):**
-- `core/frame_graph.py`: `adjoint(T) -> np.ndarray (6,6)`, `compute_sensitivity(fg, frame_a, frame_b, edge_names) -> np.ndarray (6, 6*N)`, `path_edges_between(frame_a, frame_b) -> list[tuple[HTMEdge, bool]]` — B1-1 / commit `d81645c`. B2 calls these; does NOT re-implement them.
-- `sim/monte_carlo_fk.py`: `MonteCarloFKEngine.run(fg, n_trials, seed) -> TrialData` — A4 / commit `744c562`.
-- `postprocess/stats.py`: `point_pair_envelope_box(trial_data, frame_graph, frame_a, frame_b) -> dict` — A5 / commit `019eb34`. Used by `validate()` to compute achieved envelope.
-- `core/tolerance.py`: `ToleranceSpec`, `ToleranceSpec6` with `.locked` flag — A2 / commit `3ac0eed`. Locked edges excluded from free-variable set in allocation only.
-
-**Design decision resolved (2026-06-28):** The multi-DoF reconciliation question (most-restrictive s_k vs. least-squares) was moot — `EqualAllocation`/`RSSAllocation` were superseded and removed. `LoosestAllocation` handles all DoFs independently via the NLP; no single scale factor is computed.
-
-**Locked constants (do not change without user discussion):**
-- `gamma = 0.9` per iteration (within the spec-locked `[0.7, 0.95]` range — pick 0.9 as the default)
-- `max_iter = 10`
-- `n_validate = 1000` (MC trials per validation pass — deliberately low for speed)
-- Non-convergence status message: **exactly** `"Allocation could not converge to target budget"`
-- `AllocationResult` must preserve **both** `baseline_linear_allocation` and `corrected_allocation` — never overwrite one with the other
-
-**B-2 task order (all complete):**
-1. B2-1: `AllocationEngine.solve()` — closed-form linear step *(EqualAllocation later removed)*
-2. B2-2: `AllocationEngine.allocate()` + `AllocationResult` + `validate()` — damping loop and MC validation
-3. B2-3: Real tests in `tests/test_allocation.py` (16 tests as of final state)

@@ -140,16 +140,16 @@ class TestFitBoundingEllipsoid:
         assert np.all(inside <= 1.0 + 1e-9)
 
     def test_statistical_smaller_than_worst_case(self):
-        """coverage=0.997 ellipsoid must be strictly smaller than coverage=1.0."""
+        """coverage=0.9973 ellipsoid must be strictly smaller than coverage=1.0."""
         rng = np.random.default_rng(4)
         pts = rng.standard_normal((5000, 3))
-        stat = fit_bounding_ellipsoid(pts, coverage=0.997)
+        stat = fit_bounding_ellipsoid(pts, coverage=0.9973)
         worst = fit_bounding_ellipsoid(pts, coverage=1.0)
         # At least one axis of the statistical ellipsoid must be shorter
         assert np.any(stat["axes_lengths"] < worst["axes_lengths"])
 
     def test_known_sphere_statistical(self):
-        """Isotropic normal: statistical ellipsoid at coverage≈0.997 → radius ≈ 3σ."""
+        """Isotropic normal: statistical ellipsoid at coverage=0.9973 → radius ≈ 3σ."""
         rng = np.random.default_rng(5)
         sigma = 2.0
         pts = rng.standard_normal((100_000, 3)) * sigma

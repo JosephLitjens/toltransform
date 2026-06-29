@@ -184,6 +184,9 @@ class ToleranceSpec6:
     def __getitem__(self, idx: int) -> ToleranceSpec:
         return self._specs[idx]
 
+    def __iter__(self):
+        return iter(self._specs)
+
     def __len__(self) -> int:
         return 6
 
