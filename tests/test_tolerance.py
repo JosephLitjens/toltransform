@@ -12,10 +12,9 @@ from core.tolerance import (
     ToleranceSpec6,
     apply_perturbation_batch,
     delta_to_htm_batch,
-    skew,
     small_angle_rotation_matrix_batch,
 )
-from core.transforms import HTM
+from core.transforms import HTM, skew
 
 
 # ── ToleranceSpec construction and validation ────────────────────────────────

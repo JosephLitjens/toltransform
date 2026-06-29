@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 import networkx as nx
 import numpy as np
 
-from core.tolerance import ToleranceSpec6, skew
-from core.transforms import HTM
+from core.tolerance import ToleranceSpec6
+from core.transforms import HTM, skew
 
 
 # ── Exception ────────────────────────────────────────────────────────────────
@@ -192,14 +192,22 @@ class FrameGraph:
                 result.append((self._g.edges[v, u]['edge'], False))
         return result
 
+    def get_edge(self, name: str) -> HTMEdge:
+        """Return the HTMEdge with the given name."""
+        return self._edges[name]
+
+    def are_connected(self, frame_a: str, frame_b: str) -> bool:
+        """Return True if frame_a and frame_b share a connected component."""
+        for component in self.weakly_connected_components():
+            if frame_a in component and frame_b in component:
+                return True
+        return False
+
     # ── Internal helpers ─────────────────────────────────────────────────────
 
     def _assert_same_component(self, frame_a: str, frame_b: str) -> None:
-        components = self.weakly_connected_components()
-        for component in components:
-            if frame_a in component and frame_b in component:
-                return
-        raise DisjointFramesError(_disjoint_message(frame_a, frame_b))
+        if not self.are_connected(frame_a, frame_b):
+            raise DisjointFramesError(_disjoint_message(frame_a, frame_b))
 
 
 # ── Sensitivity primitives (relocated from sim/allocation.py per Mod 2) ──────
@@ -253,7 +261,7 @@ def compute_sensitivity(
 
     blocks: list[np.ndarray] = []
     for name in edge_names:
-        edge = frame_graph._edges[name]
+        edge = frame_graph.get_edge(name)
         is_forward = direction_map[name]
         exit_node = edge.child if is_forward else edge.parent
         # Sensitivity = Ad_{T_{frame_a → exit_node}}: the perturbation at exit_node

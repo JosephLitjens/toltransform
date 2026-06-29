@@ -21,7 +21,7 @@ from typing import Literal
 import numpy as np
 
 from core import sampling as _sampling
-from core.transforms import HTM
+from core.transforms import HTM, skew
 
 
 # ── ToleranceSpec (single DoF) ───────────────────────────────────────────────
@@ -199,29 +199,6 @@ class ToleranceSpec6:
 
 
 # ── Perturbation pipeline ────────────────────────────────────────────────────
-
-def skew(v: np.ndarray) -> np.ndarray:
-    """Batched skew-symmetric matrix from a 3-vector or batch of 3-vectors.
-
-    Parameters
-    ----------
-    v : np.ndarray, shape (..., 3)
-
-    Returns
-    -------
-    np.ndarray, shape (..., 3, 3)
-    """
-    v = np.asarray(v, dtype=float)
-    *batch, _ = v.shape
-    S = np.zeros((*batch, 3, 3))
-    S[..., 0, 1] = -v[..., 2]
-    S[..., 0, 2] =  v[..., 1]
-    S[..., 1, 0] =  v[..., 2]
-    S[..., 1, 2] = -v[..., 0]
-    S[..., 2, 0] = -v[..., 1]
-    S[..., 2, 1] =  v[..., 0]
-    return S
-
 
 def small_angle_rotation_matrix_batch(rotvec_batch: np.ndarray) -> np.ndarray:
     """Build re-orthonormalized rotation matrices from small-angle rotation vectors.

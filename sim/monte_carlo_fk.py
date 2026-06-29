@@ -122,7 +122,7 @@ class MonteCarloFKEngine:
 
         # Process edges in topological order (child always after parent).
         for edge_name in frame_graph.topological_edge_order():
-            edge = frame_graph._edges[edge_name]
+            edge = frame_graph.get_edge(edge_name)
 
             edge_seed_log[edge_name] = _spawn_key(edge_name)
             rng = make_edge_rng(seed, edge_name)
