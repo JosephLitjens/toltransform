@@ -101,10 +101,8 @@ class HTM:
     @classmethod
     def from_matrix(cls, matrix: np.ndarray) -> HTM:
         """Construct from a 4x4 NumPy array (validated on entry)."""
-        return cls(
-            np.asarray(matrix, dtype=np.float64),
-            {"kind": "matrix", "raw_params": {"matrix": np.asarray(matrix, dtype=np.float64).copy()}},
-        )
+        m = np.asarray(matrix, dtype=np.float64)
+        return cls(m, {"kind": "matrix", "raw_params": {"matrix": m.copy()}})
 
     @classmethod
     def from_quaternion(cls, quat_wxyz: np.ndarray, xyz: np.ndarray) -> HTM:

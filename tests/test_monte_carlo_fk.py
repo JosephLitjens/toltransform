@@ -14,7 +14,7 @@ import pytest
 from core.frame_graph import FrameGraph
 from core.tolerance import ToleranceSpec, ToleranceSpec6, apply_perturbation_batch
 from core.transforms import HTM
-from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData, make_edge_rng
+from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

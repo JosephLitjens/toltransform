@@ -17,8 +17,6 @@ from core.tolerance import (
 )
 from core.transforms import HTM
 
-_RNG = np.random.default_rng(42)
-
 
 # ── ToleranceSpec construction and validation ────────────────────────────────
 

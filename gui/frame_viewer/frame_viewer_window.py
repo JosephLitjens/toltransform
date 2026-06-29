@@ -68,7 +68,7 @@ def _nominal_to_matrix(model: HTMInputModel) -> np.ndarray:
         T[:3, :3] = SciRotation.from_quat([x, y, z, w]).as_matrix()  # scipy: [x,y,z,w]
         T[:3, 3] = model.xyz
     elif isinstance(model, HTMInputScrew):
-        axis = np.array(model.screw_axis, dtype=float)
+        axis = np.array(model.axis, dtype=float)
         norm = np.linalg.norm(axis)
         if norm > 1e-10:
             axis = axis / norm

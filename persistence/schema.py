@@ -399,7 +399,7 @@ def project_model_to_frame_graph(project: ProjectModel) -> FrameGraph:
     """
     fg = FrameGraph()
     for f in project.frames:
-        fg.add_frame(f.name, metadata=f.metadata or None)
+        fg.add_frame(f.name, metadata=f.metadata)
     for e in project.edges:
         htm = _model_to_htm(e.nominal)
         tol6 = _model_to_tol6(e.tolerance)

@@ -455,8 +455,7 @@ def _combine_validation_reports(
             worst_min = min(worst_min, d.get("min", 0.0))
             worst_max = max(worst_max, d.get("max", 0.0))
             dof_pass = dof_pass and rpt.per_dof_pass.get(dof, True)
-        combined_envelope[dof] = {"min": worst_min if worst_min != float("inf") else 0.0,
-                                   "max": worst_max if worst_max != float("-inf") else 0.0}
+        combined_envelope[dof] = {"min": worst_min, "max": worst_max}
         combined_per_dof[dof] = dof_pass
         all_passed = all_passed and dof_pass
 
@@ -781,7 +780,7 @@ class AllocationEngine:
 
         all_passed, per_pair = _mc_validate_multi(frame_graph, baseline, targets, n_validate, seed)
 
-        # Synthesise a combined ValidationReport (first pair is the canonical reference;
+        # Synthesise a combined ValidationReport (element-wise worst envelope across all pairs;
         # per_pair carries the full per-pair breakdown).
         combined_report = _combine_validation_reports(per_pair)
 

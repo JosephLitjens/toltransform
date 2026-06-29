@@ -21,11 +21,11 @@ import pytransform3d.transformations as _pt
 
 # ── Version guard ────────────────────────────────────────────────────────────
 _TESTED_MAJOR = 3
-_installed = tuple(int(x) for x in _p3d.__version__.split(".")[:2])
-if _installed[0] != _TESTED_MAJOR:
+_installed_major = int(_p3d.__version__.split(".")[0])
+if _installed_major != _TESTED_MAJOR:
     warnings.warn(
         f"pytransform3d major version changed from {_TESTED_MAJOR} to "
-        f"{_installed[0]}. Euler/quaternion/screw conventions may have "
+        f"{_installed_major}. Euler/quaternion/screw conventions may have "
         "shifted — verify conversions.py against the new API.",
         UserWarning,
         stacklevel=1,

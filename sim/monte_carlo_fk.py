@@ -67,8 +67,9 @@ class TrialData:
     frame_poses : dict[str, np.ndarray]
         frame_name -> (N,4,4) float64 absolute pose per trial, in the root frame.
         Root frames are tiled identity for every trial (no incoming edge, no perturbation).
-        Relative transform between any two frames in the same component for trial i is
-        ``np.linalg.inv(frame_poses[a][i]) @ frame_poses[b][i]`` — no graph re-traversal.
+        Relative transform between any two frames in the same component for trial i can
+        be computed via the closed-form inverse (see ``_htm_inverse_batch`` in
+        ``postprocess/stats.py``): ``R.T @ ...`` avoids the slower ``np.linalg.inv``.
     nominal_poses : dict[str, np.ndarray]
         frame_name -> (4,4) float64 unperturbed reference pose.
     edge_seed_log : dict[str, int]

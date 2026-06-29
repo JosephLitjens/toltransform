@@ -12,16 +12,12 @@ Design decisions (locked, Section 2.3):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 import networkx as nx
 import numpy as np
 
 from core.tolerance import ToleranceSpec6, skew
 from core.transforms import HTM
-
-if TYPE_CHECKING:
-    pass  # avoid circular imports if needed later
 
 
 # ── Exception ────────────────────────────────────────────────────────────────

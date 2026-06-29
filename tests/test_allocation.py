@@ -8,7 +8,7 @@ import pytest
 from core.frame_graph import FrameGraph
 from core.tolerance import ToleranceSpec, ToleranceSpec6
 from core.transforms import HTM
-from sim.allocation import DOF_LABELS, AllocationEngine, LoosestAllocation, _mc_validate_multi
+from sim.allocation import DOF_LABELS, AllocationEngine, _mc_validate_multi
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
