@@ -23,6 +23,7 @@ from persistence.schema import (
     HTMInputScrew,
     HTMInputXyzEuler,
     HTMEdgeModel,
+    IKConstraintModel,
     ProjectModel,
     SavedAnalysisModel,
     SimSettingsModel,
@@ -326,3 +327,81 @@ class TestConversionFunctions:
         fg2 = project_model_to_frame_graph(pm)
         world_frame = next(f for f in fg2.all_frames() if f.name == "world")
         assert world_frame.metadata == {"color": "red", "units": "mm"}
+
+
+# ── TestIKConstraintModel ─────────────────────────────────────────────────────
+
+def _make_tol6_model(bound: float = 0.001) -> ToleranceSpec6Model:
+    s = ToleranceSpecModel(distribution="uniform", bound=bound)
+    return ToleranceSpec6Model(dx=s, dy=s, dz=s, rx=s, ry=s, rz=s)
+
+
+class TestIKConstraintModel:
+    def test_ik_constraint_valid(self):
+        c = IKConstraintModel(frame_a="A", frame_b="B", target=_make_tol6_model(0.005))
+        assert c.frame_a == "A"
+        assert c.frame_b == "B"
+        assert c.target.dx.bound == pytest.approx(0.005)
+
+    def test_sim_settings_ik_max_iter_default(self):
+        s = SimSettingsModel(mode="fk_verification", n_trials=100, seed=0)
+        assert s.ik_max_iter == 30
+
+    def test_sim_settings_ik_constraints_default_empty(self):
+        s = SimSettingsModel(mode="fk_verification", n_trials=100, seed=0)
+        assert s.ik_constraints == []
+
+    def test_sim_settings_with_constraints_round_trips(self):
+        c = IKConstraintModel(frame_a="A", frame_b="B", target=_make_tol6_model(0.01))
+        s = SimSettingsModel(mode="ik_allocation", n_trials=500, seed=7,
+                             ik_constraints=[c], ik_max_iter=20)
+        assert len(s.ik_constraints) == 1
+        assert s.ik_max_iter == 20
+        assert s.ik_constraints[0].frame_a == "A"
+        assert s.ik_constraints[0].target.rz.bound == pytest.approx(0.01)
+
+    def test_project_model_validates_ik_constraint_frame_a(self):
+        """IK constraint referencing a non-existent frame_a should raise."""
+        data = {
+            "sim_settings": {
+                "mode": "ik_allocation", "n_trials": 100, "seed": 0,
+                "ik_constraints": [{
+                    "frame_a": "ghost",
+                    "frame_b": "b",
+                    "target": {dof: {"distribution": "uniform", "bound": 0.001}
+                               for dof in ("dx", "dy", "dz", "rx", "ry", "rz")},
+                }],
+            },
+            "frames": [{"name": "a"}, {"name": "b"}],
+            "edges": [{
+                "name": "e", "parent": "a", "child": "b",
+                "nominal": {"kind": "matrix", "matrix": np.eye(4).tolist()},
+                "tolerance": {dof: {"distribution": "uniform", "bound": 0.001}
+                              for dof in ("dx", "dy", "dz", "rx", "ry", "rz")},
+            }],
+        }
+        with pytest.raises(ValidationError, match="ghost"):
+            ProjectModel.model_validate(data)
+
+    def test_project_model_validates_ik_constraint_frame_b(self):
+        """IK constraint referencing a non-existent frame_b should raise."""
+        data = {
+            "sim_settings": {
+                "mode": "ik_allocation", "n_trials": 100, "seed": 0,
+                "ik_constraints": [{
+                    "frame_a": "a",
+                    "frame_b": "missing",
+                    "target": {dof: {"distribution": "uniform", "bound": 0.001}
+                               for dof in ("dx", "dy", "dz", "rx", "ry", "rz")},
+                }],
+            },
+            "frames": [{"name": "a"}, {"name": "b"}],
+            "edges": [{
+                "name": "e", "parent": "a", "child": "b",
+                "nominal": {"kind": "matrix", "matrix": np.eye(4).tolist()},
+                "tolerance": {dof: {"distribution": "uniform", "bound": 0.001}
+                              for dof in ("dx", "dy", "dz", "rx", "ry", "rz")},
+            }],
+        }
+        with pytest.raises(ValidationError, match="missing"):
+            ProjectModel.model_validate(data)

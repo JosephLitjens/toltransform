@@ -23,7 +23,7 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -40,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from persistence.schema import ProjectModel, project_model_to_frame_graph
+from persistence.schema import ProjectModel, ToleranceSpecModel, project_model_to_frame_graph
 from postprocess.reporting import generate_frame_report, generate_sensitivity_report
 from postprocess.stats import DOF_LABELS, compute_tolerance_sensitivities, frame_envelope_box
 from core.tolerance import ToleranceSpec6
@@ -89,12 +90,19 @@ def _fill_envelope_table(table: QTableWidget, envelope: dict) -> None:
 
 
 class ResultsViewerWidget(QWidget):
-    """Displays FK or IK simulation results. Read-only — no signals out."""
+    """Displays FK or IK simulation results.
+
+    Emits project_changed when the user applies an IK allocation back to the
+    project (the only write operation this widget performs).
+    """
+
+    project_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._project: ProjectModel | None = None
         self._trial_data: TrialData | None = None
+        self._last_ik_result: AllocationResult | None = None
         self._open_windows: list[_FigureWindow] = []
         self._setup_ui()
 
@@ -104,14 +112,18 @@ class ResultsViewerWidget(QWidget):
         self._project = project
         if isinstance(result, TrialData):
             self._trial_data = result
+            self._last_ik_result = None
             self._show_fk(result)
         elif isinstance(result, AllocationResult):
             self._trial_data = None
+            self._last_ik_result = result
             self._show_ik(result)
 
     def clear(self) -> None:
         self._project = None
         self._trial_data = None
+        self._last_ik_result = None
+        self._apply_btn.setEnabled(False)
         self._close_windows()
         self._stack.setCurrentIndex(0)
 
@@ -208,6 +220,16 @@ class ResultsViewerWidget(QWidget):
             QHeaderView.ResizeMode.Stretch
         )
         alloc_layout.addWidget(self._alloc_table)
+
+        self._apply_btn = QPushButton("Apply Corrected Allocation to Project…")
+        self._apply_btn.setEnabled(False)
+        self._apply_btn.setToolTip(
+            "Write the corrected tolerance bounds back to the project's edge tolerance "
+            "specs. Only available when the allocation converged. Locked DoFs are not "
+            "changed. A confirmation prompt will appear before any values are overwritten."
+        )
+        self._apply_btn.clicked.connect(self._on_apply_clicked)
+        alloc_layout.addWidget(self._apply_btn)
         layout.addWidget(alloc_group)
 
         # Per-pair achieved envelope section — rebuilt dynamically in _show_ik().
@@ -272,6 +294,7 @@ class ResultsViewerWidget(QWidget):
     # ── IK display ─────────────────────────────────────────────────────────────
 
     def _show_ik(self, result: AllocationResult) -> None:
+        self._apply_btn.setEnabled(result.converged)
         method_label = "Loosest (LP)"
 
         if result.converged:
@@ -362,6 +385,72 @@ class ResultsViewerWidget(QWidget):
             table.setItem(row, col, pass_item)
 
         return table
+
+    def _on_apply_clicked(self) -> None:
+        if self._last_ik_result is None or self._project is None:
+            return
+
+        allocation = self._last_ik_result.corrected_allocation
+        edges_affected = [
+            e.name for e in self._project.edges if e.name in allocation
+        ]
+        if not edges_affected:
+            QMessageBox.information(
+                self,
+                "Apply Allocation",
+                "No matching edges found in the project for this allocation result.",
+            )
+            return
+
+        # Build a preview of what will change for the confirmation dialog.
+        lines = ["The following edge tolerance bounds will be overwritten:\n"]
+        for edge_name in edges_affected:
+            tol6 = allocation[edge_name]
+            parts = []
+            for dof in DOF_LABELS:
+                spec = getattr(tol6, dof)
+                if not spec.locked:
+                    parts.append(f"{dof}: {spec.bound:.6f}")
+            if parts:
+                lines.append(f"  {edge_name}: {', '.join(parts)}")
+        lines.append(
+            "\nLocked DoFs are preserved. Distribution and sigma level are "
+            "set to uniform for overwritten DoFs."
+        )
+
+        reply = QMessageBox.question(
+            self,
+            "Apply Corrected Allocation",
+            "\n".join(lines),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        # Write corrected bounds into the project's edge tolerance models.
+        for edge_model in self._project.edges:
+            if edge_model.name not in allocation:
+                continue
+            tol6 = allocation[edge_model.name]
+            for dof in DOF_LABELS:
+                spec = getattr(tol6, dof)
+                if spec.locked:
+                    continue  # never touch locked DoFs
+                setattr(
+                    edge_model.tolerance,
+                    dof,
+                    ToleranceSpecModel(
+                        distribution="uniform",
+                        bound=spec.bound,
+                        sigma_level=spec.sigma_level,
+                        locked=False,
+                        lower=None,
+                        upper=None,
+                    ),
+                )
+
+        self.project_changed.emit()
 
     def _clear_per_pair_widgets(self) -> None:
         while self._per_pair_layout.count():

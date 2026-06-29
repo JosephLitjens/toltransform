@@ -9,7 +9,7 @@ Public models:
     ToleranceSpecModel, ToleranceSpec6Model
     HTMInputXyzEuler, HTMInputMatrix, HTMInputQuaternion, HTMInputScrew
     HTMInputModel          (discriminated union of the four input variants)
-    FrameModel, HTMEdgeModel, SimSettingsModel, SavedAnalysisModel
+    FrameModel, HTMEdgeModel, IKConstraintModel, SimSettingsModel, SavedAnalysisModel
     ProjectModel           (top-level container with cross-reference validation)
 
 Public conversion functions:
@@ -143,6 +143,15 @@ class HTMEdgeModel(BaseModel):
     tolerance: ToleranceSpec6Model
 
 
+# ── IK constraint model ───────────────────────────────────────────────────────
+
+class IKConstraintModel(BaseModel):
+    """One point-pair IK constraint: a frame pair + per-DoF target tolerances."""
+    frame_a: str
+    frame_b: str
+    target: ToleranceSpec6Model
+
+
 # ── Simulation settings model ─────────────────────────────────────────────────
 
 class SimSettingsModel(BaseModel):
@@ -152,6 +161,8 @@ class SimSettingsModel(BaseModel):
     seed: int
     default_distribution: Literal["uniform", "normal"] = "uniform"
     default_sigma_level: float = 3.0
+    ik_constraints: list[IKConstraintModel] = Field(default_factory=list)
+    ik_max_iter: int = 30
 
 
 # ── Saved analysis model ──────────────────────────────────────────────────────
@@ -200,6 +211,15 @@ class ProjectModel(BaseModel):
                 if ref not in frame_names:
                     raise ValueError(
                         f"SavedAnalysis '{analysis.name}' references {attr}='{ref}' "
+                        "which is not a declared frame. "
+                        f"Declared frames: {sorted(frame_names)}"
+                    )
+        for i, constraint in enumerate(self.sim_settings.ik_constraints):
+            for attr in ("frame_a", "frame_b"):
+                ref = getattr(constraint, attr)
+                if ref not in frame_names:
+                    raise ValueError(
+                        f"IK constraint {i} references {attr}='{ref}' "
                         "which is not a declared frame. "
                         f"Declared frames: {sorted(frame_names)}"
                     )
