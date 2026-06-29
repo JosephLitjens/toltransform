@@ -569,3 +569,37 @@ def test_allocate_multi_lever_arm_two_pairs():
             f"{[k for k, v in vr.per_dof_pass.items() if not v]}"
         )
 
+
+
+def test_allocate_multi_non_convergence_returns_method_field():
+    """Regression: allocate_multi non-convergence path must not raise NameError.
+
+    Previously the non-convergence return used the undefined variable `method_name`
+    instead of the hardcoded string "LoosestAllocation", causing a NameError
+    whenever allocate_multi ran out of iterations.
+    """
+    fg = FrameGraph()
+    for f in ("base", "pivot", "arm"):
+        fg.add_frame(f)
+
+    # Same lever-arm geometry, but with an absurdly tight target that can never
+    # converge in max_iter=2 iterations — forces the non-convergence branch.
+    pivot_tol = ToleranceSpec6(
+        _spec(0.0, locked=True), _spec(0.0, locked=True), _spec(0.0, locked=True),
+        _spec(0.0, locked=True), _spec(0.0, locked=True), _spec(0.01),
+    )
+    arm_nom = HTM.from_xyz_euler([1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    fg.add_edge("base", "pivot", _identity(), pivot_tol, "pivot_edge")
+    fg.add_edge("pivot", "arm",  arm_nom,     _locked_tol6(), "arm_edge")
+
+    # Target dy = 0.00001 is impossibly tight — forces non-convergence.
+    tight_target = _lever_target(b_trans=0.00001, b_rx=0.20, b_rz=0.10)
+    result = AllocationEngine.allocate_multi(
+        fg, [("base", "arm", tight_target)],
+        n_validate=100, gamma=0.9, max_iter=2, seed=42,
+    )
+
+    assert not result.converged
+    assert result.status_message == "Allocation could not converge to target budget"
+    assert result.method == "LoosestAllocation"   # was NameError before the fix
+    assert result.iterations_used == 2

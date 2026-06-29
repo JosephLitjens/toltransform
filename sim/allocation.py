@@ -770,5 +770,5 @@ class AllocationEngine:
             final_validation_report=combined_report,
             per_pair_validation=per_pair,
             per_pair_targets=targets,
-            method=method_name,
+            method="LoosestAllocation",
         )
