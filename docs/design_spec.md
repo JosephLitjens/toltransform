@@ -2,7 +2,7 @@
 title: "TolTransform: Design Specifications & Project Plan"
 subtitle: "A Kinematic Error-Budgeting Tool for Precision Machine Design"
 author: "Living Engineering Document — Architecture, Module Specifications, and Phased Plan"
-date: "Last updated: 2026-06-28 (evening — asymmetric tolerances, locked-budget fix)"
+date: "Last updated: 2026-06-29 (apply-allocation button + persist IK simulation parameters)"
 geometry: margin=1in
 fontsize: 11pt
 toc: true
@@ -1008,13 +1008,13 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.11 `persistence/schema.py`
 
-*(Last revised: 2026-06-25 — Claude, B1-5 implementation, commit `fda4e5c`, 24 tests in `tests/test_schema.py`.)*
+*(Last revised: 2026-06-29 — Claude, apply-allocation + persist IK parameters feature, commit `ca37d91`. Prior: B1-5 implementation, commit `fda4e5c`, 24 tests. Now 30 tests in `tests/test_schema.py`.)*
 
 **Responsibility:** Pydantic models defining the on-disk project data model — the only interface the GUI is permitted to read from or write to (Section 5.3).
 
 **Deliverables:**
 
-- `FrameModel`, `HTMEdgeModel`, `ToleranceSpecModel`/`ToleranceSpec6Model`, `SimSettingsModel`, `SavedAnalysisModel`, `ProjectModel`
+- `FrameModel`, `HTMEdgeModel`, `ToleranceSpecModel`/`ToleranceSpec6Model`, `IKConstraintModel`, `SimSettingsModel`, `SavedAnalysisModel`, `ProjectModel`
 - Bidirectional conversion functions between these Pydantic models and the live `core`/`sim` objects (`FrameGraph`, `ToleranceSpec6`, etc.)
 - `tests/test_schema.py` (new test file)
 
@@ -1043,6 +1043,19 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
     - `TestProjectModelValidation` (6 tests): valid project, `schema_version` defaults to 1, dangling edge parent/child raises, dangling saved-analysis frame_a/frame_b raises
     - `TestHTMInputModelRoundTrip` (7 tests): all 4 `kind` variants, screw null/non-null `point_on_axis`, `None` input_representation fallback to matrix
     - `TestConversionFunctions` (7 tests): frame/edge names round-trip, HTM matrix close, tolerance all-fields, no `validate_dag()` required, saved analyses, frame metadata
+13. ✅ **Done (feature branch, `ca37d91`)** Implement `IKConstraintModel`: `frame_a: str`, `frame_b: str`, `target: ToleranceSpec6Model`. Represents one point-pair IK constraint — the frame pair and per-DoF target tolerances used by the multi-pair allocation engine.
+14. ✅ **Done (feature branch, `ca37d91`)** Extend `SimSettingsModel` with IK persistence fields:
+    - `ik_constraints: list[IKConstraintModel] = Field(default_factory=list)` — the saved constraint list; defaults to empty so existing project files load without modification.
+    - `ik_max_iter: int = 30` — saved maximum damping iterations; defaults to 30 matching the run panel default.
+    Both fields have defaults to ensure full backward compatibility: projects saved before this change load and validate without error, and immediately gain a working IK setup when mode is switched.
+15. ✅ **Done (feature branch, `ca37d91`)** Extend `ProjectModel.validate_references()` to check IK constraint frame references: for each `IKConstraintModel` in `sim_settings.ik_constraints`, validates both `frame_a` and `frame_b` are declared frames. Raises `ValidationError` with the index, attribute, bad reference, and sorted list of declared frames.
+16. ✅ **Done (feature branch, `ca37d91`)** `tests/test_schema.py` additions — 6 new tests in new class `TestIKConstraintModel`:
+    - `test_ik_constraint_valid` — valid round-trip
+    - `test_sim_settings_ik_max_iter_default` — default is 30
+    - `test_sim_settings_ik_constraints_default_empty` — default is `[]`
+    - `test_sim_settings_with_constraints_round_trips` — full project round-trip with constraints present
+    - `test_project_model_validates_ik_constraint_frame_a` — dangling `frame_a` raises
+    - `test_project_model_validates_ik_constraint_frame_b` — dangling `frame_b` raises
 
 **Interfaces:**
 
@@ -1050,7 +1063,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - *Used by:* `persistence/serializer.py` (Section 6.12), eventually every GUI panel (Section 5.3 — the GUI reads/writes only these models).
 - *Public API (conceptual):*
   ```
-  ProjectModel, FrameModel, HTMEdgeModel, ToleranceSpec6Model, SimSettingsModel, SavedAnalysisModel
+  ProjectModel, FrameModel, HTMEdgeModel, ToleranceSpec6Model, IKConstraintModel, SimSettingsModel, SavedAnalysisModel
   ProjectModel.validate_references() -> None  # raises on violation
   project_model_to_frame_graph(project: ProjectModel) -> FrameGraph
   frame_graph_to_project_model(frame_graph, sim_settings, saved_analyses) -> ProjectModel
@@ -1095,7 +1108,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.13 `gui/main_window.py`
 
-*(Last revised: 2026-06-28 — Claude, C-1 through C-7 Milestone C implementation. **Implemented C-1 through C-7, commit `f1ffa2c` (C-6+C-7). Suite: 302 passed.** Original planning note (2026-06-23): GUI modules are specified at a coarser grain than core/sim/postprocess/io, consistent with Section 10's rule that GUI work does not begin until the engine is proven.)*
+*(Last revised: 2026-06-29 — Claude, `_on_allocation_applied` handler added (feature branch, commit `ca37d91`). Prior: C-1 through C-7 Milestone C implementation, commit `f1ffa2c` (C-6+C-7). Suite: 373 passed. Original planning note (2026-06-23): GUI modules are specified at a coarser grain than core/sim/postprocess/io, consistent with Section 10's rule that GUI work does not begin until the engine is proven.)*
 
 **Responsibility:** Top-level `QMainWindow`; owns the currently-loaded `ProjectModel` in memory, hosts all five GUI panels as named `QDockWidget` instances, owns File menu actions (New/Open/Save/Save As/Exit), cross-panel signal routing, and session persistence via `QSettings`.
 
@@ -1127,6 +1140,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 | `RunPanelWidget` | `run_completed(object)` | `_on_run_completed()` → routes to `ResultsViewerWidget.set_result()` AND `PointPairPanelWidget.set_result()` |
 | `RunPanelWidget` | `run_failed(str)` | `_on_run_failed()` → no-op (run panel already shows error in its own status label) |
 | `PointPairPanelWidget` | `project_changed` | `_on_project_changed()` → sets dirty |
+| `ResultsViewerWidget` | `project_changed` | `_on_allocation_applied()` → sets dirty, calls `refresh_view()` on Tolerance Editor so the newly-written bounds appear immediately |
 
 **QSettings persistence (C-7):**
 
@@ -1149,6 +1163,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
   MainWindow._project: ProjectModel
   MainWindow._on_graph_editor_changed() -> None
   MainWindow._on_run_completed(result: object) -> None
+  MainWindow._on_allocation_applied() -> None
   MainWindow._new_project() -> None
   MainWindow._open_project() -> None
   _empty_project() -> ProjectModel   # module-level helper
@@ -1241,9 +1256,9 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.16 `gui/run_panel/`
 
-*(Last revised: 2026-06-28 — Claude, C-3 Milestone C implementation + allocation enhancements. **Implemented C-3, commit `d0457bd`. IK enhancements (method selector, max_iter spinbox) added on feature branch, merged to main 2026-06-28.**)* 
+*(Last revised: 2026-06-29 — Claude, IK constraint + max_iter persistence added (feature branch, commit `ca37d91`). Prior: C-3 Milestone C implementation, commit `d0457bd`; IK enhancements (max_iter spinbox) merged to main 2026-06-28. Suite: 373 passed.)*
 
-**Responsibility:** Configure and trigger a simulation run. **The one and only place where `persistence.schema` objects are converted into live `core`/`sim` objects** (Section 5.3). Runs the engine on a `QThread` background worker to keep the UI responsive. Writes SimSettings back to `project.sim_settings` on every field change so they persist with the project file.
+**Responsibility:** Configure and trigger a simulation run. **The one and only place where `persistence.schema` objects are converted into live `core`/`sim` objects** (Section 5.3). Runs the engine on a `QThread` background worker to keep the UI responsive. Writes SimSettings back to `project.sim_settings` on every field change so they persist with the project file — including the full IK constraint list and `ik_max_iter`.
 
 **Deliverables:**
 
@@ -1256,6 +1271,12 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - **SimSettings write-back**: mode, n_trials, and seed changes call `_on_mode_changed()` / `_on_n_trials_changed()` / `_on_seed_changed()` which update `project.sim_settings.*` in place and emit `project_changed`.
 - **Randomize button**: sets seed to `random.randint(0, 2**31 - 1)`.
 - **IK target group**: dynamic list of `_ConstraintRowWidget` instances (Frame A/B combos + 6 DoF spinboxes each) + "Add Constraint" / "✕ Remove" buttons + **Max iterations spinbox** (`_max_iter_spin`, default 30, range 1–500). Frame combos refreshed by `refresh_view()` when the graph changes. No method selector — `LoosestAllocation` is always used.
+- **IK constraint persistence**: constraint rows and `ik_max_iter` are saved to and loaded from `project.sim_settings` on every change, so they survive project save/load and are available to the run panel immediately when a project is opened.
+  - `_load_ik_constraints_from_project()`: clears existing rows, then rebuilds them from `project.sim_settings.ik_constraints`, calling `row.set_frame_pair(frame_a, frame_b)` and `row.set_target_model(target)` with `blockSignals(True)` during programmatic population to suppress spurious `project_changed` emissions.
+  - `_save_ik_constraints_to_project()`: iterates current `_constraint_rows`, writes a `IKConstraintModel` per row to `project.sim_settings.ik_constraints`.
+  - `_on_max_iter_changed(value)`: writes to `project.sim_settings.ik_max_iter` and emits `project_changed`.
+  - `_on_constraints_changed()`: called when any constraint row's frame pair or target spinbox changes; calls `_save_ik_constraints_to_project()` and emits `project_changed`.
+  - `_load_sim_settings()` now also calls `_max_iter_spin.setValue(s.ik_max_iter)` and `_load_ik_constraints_from_project()` so IK state is fully restored on `set_project()`.
 - **Run flow** (`_on_run_clicked()`):
   1. Guard: no edges → error status, return.
   2. IK guard: A==B or empty → error status, return.
@@ -1278,24 +1299,26 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
   RunPanelWidget.project_changed: Signal()
   RunPanelWidget.run_completed: Signal(object)   # TrialData | AllocationResult
   RunPanelWidget.run_failed: Signal(str)
-  RunPanelWidget._frame_a_combo: QComboBox        # for integration tests
-  RunPanelWidget._frame_b_combo: QComboBox        # for integration tests
+  RunPanelWidget._constraint_rows: list[_ConstraintRowWidget]  # for integration tests
+  _ConstraintRowWidget._frame_a_combo: QComboBox   # for integration tests
+  _ConstraintRowWidget._frame_b_combo: QComboBox   # for integration tests
+  _ConstraintRowWidget._spins: list[QDoubleSpinBox]  # for integration tests
   ```
 
 ---
 
 ## 6.17 `gui/results_viewer/`
 
-*(Last revised: 2026-06-28 — Claude, C-4 Milestone C implementation + IK display enhancements. **Implemented C-4, commit `63cd2ea`. IK enhancements (Target ± column, method label in status) added on feature branch, merged to main 2026-06-28.**)* 
+*(Last revised: 2026-06-29 — Claude, apply-allocation button + `project_changed` signal added (feature branch, commit `ca37d91`). Prior: C-4, commit `63cd2ea`; IK enhancements (Target ± column, method label) merged to main 2026-06-28. Suite: 373 passed.)*
 
-**Responsibility:** Display FK or IK simulation results. Read-only — no signals out, no project write-back. MainWindow calls `set_result(result, project)` after each run and `clear()` on New/Open.
+**Responsibility:** Display FK or IK simulation results. After a successful IK allocation run, the user may optionally apply the `corrected_allocation` bounds back to the project's edge tolerance specs via the "Apply Corrected Allocation to Project…" button. Emits `project_changed` after a successful apply so MainWindow can refresh the tolerance editor and set the dirty flag. MainWindow calls `set_result(result, project)` after each run and `clear()` on New/Open.
 
 **Deliverables:**
 
 - `ResultsViewerWidget(QWidget)` — `QStackedWidget` with three pages: placeholder (page 0), FK page (page 1), IK page (page 2).
 - `_FigureWindow(QWidget)` — standalone OS window hosting a Matplotlib `FigureCanvasQTAgg`; closed via `plt.close(fig)` on `closeEvent`.
 - FK page: frame selector combo → envelope table (6×3 DoF/Min/Max); "Open Frame Report in New Window" button (disabled until FK result arrives); Pareto sensitivity group (Frame A/B combos + "Compute & Open" button).
-- IK page: convergence status label (green/orange) with `[Loosest (LP)]` appended; per-pair `QGroupBox` sections (pass/fail title color) each containing a `DoF | Target ± | Min | Max | Pass?` table; corrected allocation table (edge × DoF, locked DoF as `"—"` in gray, tooltip showing baseline bound on damped cells).
+- IK page: convergence status label (green/orange) with `[Loosest (LP)]` appended; per-pair `QGroupBox` sections (pass/fail title color) each containing a `DoF | Target ± | Min | Max | Pass?` table; corrected allocation table (edge × DoF, locked DoF as `"—"` in gray, tooltip showing baseline bound on damped cells); **"Apply Corrected Allocation to Project…"** button (enabled only when `result.converged`).
 
 **Implemented Architecture:**
 
@@ -1306,8 +1329,15 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
   2. `_update_fk_display(name)` calls `frame_envelope_box()` → fills 6×3 table → enables `_view_report_btn`.
   3. `_on_view_report_clicked()` → `generate_frame_report(trial_data, name)` → `_FigureWindow` → `win.show()`.
   4. `_compute_pareto()` → `compute_tolerance_sensitivities()` + `generate_sensitivity_report()` → `_FigureWindow` → `win.show()`.
-- **IK page**: `_show_ik(result)` populates corrected-allocation table (iterating `DOF_LABELS`, checking `locked` and computing baseline diff for tooltip), achieved-envelope table with pass/fail coloring, convergence status label.
-- **`clear()`**: calls `_close_windows()` (closes all open `_FigureWindow` instances, ignoring `RuntimeError` if already destroyed), resets `_stack.currentIndex(0)`.
+- **IK page**: `_show_ik(result)` populates corrected-allocation table (iterating `DOF_LABELS`, checking `locked` and computing baseline diff for tooltip), achieved-envelope table with pass/fail coloring, convergence status label. Stores the result in `self._last_ik_result` and sets `_apply_btn.setEnabled(result.converged)`.
+- **Apply button flow** (`_on_apply_clicked()`):
+  1. Builds a preview text listing each edge and DoF bound that will change.
+  2. Shows `QMessageBox.question(...)` confirmation dialog. Aborts if the user clicks Cancel.
+  3. For each non-locked DoF on edges that appear in `corrected_allocation`, writes a `ToleranceSpecModel(distribution="uniform", bound=spec.bound, ...)` to the matching `HTMEdgeModel.tolerance` in `self._project`.
+  4. Emits `project_changed`.
+- **`project_changed = Signal()`**: class-level signal emitted after `_on_apply_clicked()` writes bounds back to the project. Received by `MainWindow._on_allocation_applied()`.
+- **`_last_ik_result: AllocationResult | None`**: stored in `__init__`, set in `_show_ik()`, cleared in `clear()`. Guards `_on_apply_clicked()` against being called without a valid result.
+- **`clear()`**: calls `_close_windows()` (closes all open `_FigureWindow` instances, ignoring `RuntimeError` if already destroyed), resets `_stack.currentIndex(0)`, sets `_apply_btn.setEnabled(False)` and `_last_ik_result = None`.
 - **`_scrollable(inner)`**: module-level helper creating a `QScrollArea(widgetResizable=True, frameShape=NoFrame)` — used to wrap both FK and IK pages so they scroll rather than clipping at small dock heights.
 
 **Interfaces:**
@@ -1318,8 +1348,11 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
   ```
   ResultsViewerWidget.set_result(result: object, project: ProjectModel) -> None
   ResultsViewerWidget.clear() -> None
+  ResultsViewerWidget.project_changed: Signal()        # emitted after apply writes bounds back
   ResultsViewerWidget._stack: QStackedWidget          # for integration tests (currentIndex)
   ResultsViewerWidget._view_report_btn: QPushButton   # for unit tests (isEnabled)
+  ResultsViewerWidget._apply_btn: QPushButton         # for unit tests (isEnabled)
+  ResultsViewerWidget._per_pair_layout: QVBoxLayout   # for unit tests (count())
   ```
 
 ---
@@ -1398,7 +1431,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 ## 6.20 `tests/`
 
-*(Last revised: 2026-06-28 — Claude, Milestone C GUI test files added. **Suite: 302 passed, 0 skipped.** Prior: B1-2 through B1-5 implementations; all four B1 test files implemented, **220 passed, 1 skipped.** Root `conftest.py` added (not to be confused with `tests/conftest.py`) to work around stdlib `io` name collision — deleted after rename to `persistence/` (2026-06-27). Original A6 note: Global tolerance convention established: `DEFAULT_ATOL=1e-9` (exact composition checks), `SMALL_ANGLE_ATOL=1e-6` (checks where trig residuals at ~1 mrad apply). Three shared fixtures in `tests/conftest.py`: `two_edge_chain`, `three_edge_chain`, `shared_frame_graph`. Integration tests cover: two-edge translation stack-up (exact), rotation→translation cross-coupling/lever-arm (hand-verified small-angle derivation), local-frame perturbation routing through nominal rotation. `test_shared_edge_sampling_consistency` written as required module-level function per Section 9 Item 3. `test_allocation_mc_validation_discrepancy` placeholder added to `test_allocation.py` per Section 9 Item 4 (`pytest.mark.skip` until B-2). README.md has CI entry point.)*
+*(Last revised: 2026-06-29 — Claude, apply-allocation + persist IK params feature tests added, commit `ca37d91`. **Suite: 373 passed, 0 skipped.** Prior: Milestone C GUI test files added 2026-06-28, **302 passed**. Root `conftest.py` added (not to be confused with `tests/conftest.py`) to work around stdlib `io` name collision — deleted after rename to `persistence/` (2026-06-27). Original A6 note: Global tolerance convention established: `DEFAULT_ATOL=1e-9` (exact composition checks), `SMALL_ANGLE_ATOL=1e-6` (checks where trig residuals at ~1 mrad apply). Three shared fixtures in `tests/conftest.py`: `two_edge_chain`, `three_edge_chain`, `shared_frame_graph`. `test_shared_edge_sampling_consistency` written as required module-level function per Section 9 Item 3. `test_allocation_mc_validation_discrepancy` placeholder added to `test_allocation.py` per Section 9 Item 4 (`pytest.mark.skip` until B-2). README.md has CI entry point.)*
 
 **Responsibility:** The full unit/integration test suite. Houses every hand-calculable validation case described per-module above, plus the dedicated cross-cutting regression tests called out in Section 9.
 
@@ -1421,7 +1454,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - `test_serializer.py` — ✅ B1-5 (`fda4e5c`): 16 tests — save/load round-trip (8 checks), error handling (file not found, malformed JSON, empty file, schema_version mismatch, dangling reference, missing required field)
 
 **Note on `conftest.py`:** There is one conftest file:
-- `tests/conftest.py` — test fixtures (`two_edge_chain`, `three_edge_chain`, `shared_frame_graph`), numerical tolerances
+- `tests/conftest.py` — test fixtures (`two_edge_chain`, `three_edge_chain`, `shared_frame_graph`), numerical tolerances, and an **autouse `_qt_main_window_test_guard` fixture** (added 2026-06-29). The guard monkeypatches `MainWindow._save_settings` and `_restore_settings` to no-ops before every test, preventing two failure modes when consecutive tests each create a `MainWindow` in offscreen Qt: (1) `_set_dirty(True)` → `closeEvent` → `QMessageBox.question()` hang in offscreen mode; (2) `QSettings` dock-state save/restore blocking the next window's `__init__`. Each test gets a clean slate; monkeypatch auto-reverts after the test.
 
 The root-level `conftest.py` (stdlib `io` name-collision workaround) was deleted when `io/` was renamed to `persistence/` (2026-06-27).
 
@@ -1439,13 +1472,13 @@ All GUI tests use `os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")` at mod
 
 - **`test_gui_tolerance_editor.py`** — ✅ C-2 (`33423f9`): **13 tests** covering `ToleranceEditorWidget`. Key tests: placeholder shown with no edges; first edge auto-selected on set_project; field changes write through to `project.edges[0].tolerance`; sigma spinbox disabled for uniform, enabled for normal; locked checkbox writes through; project_changed emitted on field change; set_selected_edge syncs combo; bulk-apply-to-edge changes all 6 DoF; bulk-apply-to-all-edges changes all edges; set_project clears selection.
 
-- **`test_gui_run_panel.py`** — ✅ C-3 (`d0457bd`): **11 tests** covering `RunPanelWidget`. Key tests: no-edges run shows error status; mode switches to IK shows IK group; IK group hidden in FK mode; frame combos populated on set_project; frame combos refreshed on refresh_view; n_trials and seed write through to sim_settings; sim_settings loaded on set_project; run_completed signal emitted on successful FK run (direct worker call, not background thread); run_failed signal emitted on engine error.
+- **`test_gui_run_panel.py`** — ✅ C-3 (`d0457bd`) + feature (`ca37d91`): **19 tests** covering `RunPanelWidget`. Original 11 tests: no-edges run shows error status; mode switches to IK shows IK group; IK group hidden in FK mode; frame combos populated on set_project; frame combos refreshed on refresh_view; n_trials and seed write through to sim_settings; sim_settings loaded on set_project; run_completed signal emitted on successful FK run (direct worker call, not background thread); run_failed signal emitted on engine error. **8 new tests (feature, `ca37d91`):** `test_run_panel_loads_ik_constraints_into_rows` — `set_project()` with saved constraints creates the right number of `_ConstraintRowWidget` rows; `test_run_panel_loaded_row_targets_match_model` — target spinboxes match the saved model; `test_run_panel_max_iter_writes_back_to_project` — spinbox change updates `project.sim_settings.ik_max_iter`; `test_run_panel_max_iter_emits_project_changed` — `project_changed` emitted on max_iter change; `test_run_panel_constraint_row_frame_change_writes_back` — changing Frame A combo updates `project.sim_settings.ik_constraints[0].frame_a`; `test_run_panel_add_constraint_row_updates_project` — "Add Constraint" button adds a new row and a new constraint model entry; `test_run_panel_loads_max_iter_from_project` — `set_project()` populates `_max_iter_spin` from saved value. **1 pre-existing broken test fixed:** `test_run_panel_ik_run_emits_allocation_result` — corrected attribute access from `widget._frame_a_combo` (wrong, never existed on `RunPanelWidget`) to `row = widget._constraint_rows[0]; row._frame_a_combo`.
 
-- **`test_gui_results_viewer.py`** — ✅ C-4 (`63cd2ea`): **11 tests** covering `ResultsViewerWidget`. Key tests: starts on page 0 (placeholder); FK result switches to page 1; IK result switches to page 2; FK frame combo populated with frame names; `_view_report_btn` enabled after FK result (replaces earlier embedded-canvas test that was removed when standalone windows were adopted); envelope table has 6 rows after FK result; IK alloc table row count matches edge count; IK achieved table has 6 rows; clear() resets to page 0; FK then clear leaves view_report_btn disabled; pareto combos populated.
+- **`test_gui_results_viewer.py`** — ✅ C-4 (`63cd2ea`) + feature (`ca37d91`): **19 tests** covering `ResultsViewerWidget`. Original 11 tests: starts on page 0 (placeholder); FK result switches to page 1; IK result switches to page 2; FK frame combo populated with frame names; `_view_report_btn` enabled after FK result; envelope table has 6 rows after FK result; IK alloc table row count matches edge count; IK per-pair section populated (≥1 QGroupBox); clear() resets to page 0; FK then clear leaves view_report_btn disabled; pareto combos populated. **1 pre-existing broken test replaced:** `test_results_viewer_ik_achieved_table_has_dof_rows` (referenced `_achieved_table` which no longer exists) → replaced with `test_results_viewer_ik_per_pair_section_populated` (checks `_per_pair_layout.count() >= 1`). **8 new apply-button tests (feature, `ca37d91`):** `test_results_viewer_apply_btn_present`; `test_results_viewer_apply_btn_disabled_initially`; `test_results_viewer_apply_btn_disabled_on_clear`; `test_results_viewer_apply_btn_state_matches_convergence` — enabled for converged result, disabled for non-converged; `test_results_viewer_apply_btn_disabled_for_fk_result` — FK result leaves button disabled; `test_results_viewer_apply_writes_bounds_to_project` — monkeypatches `QMessageBox.question → Ok`, verifies edge tolerance bounds updated; `test_results_viewer_apply_emits_project_changed` — monkeypatches `→ Ok`, verifies `project_changed` signal emitted; `test_results_viewer_apply_cancel_does_not_modify_project` — monkeypatches `→ Cancel`, verifies project untouched.
 
 - **`test_gui_point_pair_panel.py`** — ✅ C-5 (`63cd2ea`): **11 tests** covering `PointPairPanelWidget`. Key tests (all use `isHidden()`/`not isHidden()` for visibility, not `isVisible()`): placeholder shown with no result; combos populated from project; connected frames show no warning; disjoint frames show warning; name auto-populated as `"A → B"`; save adds to `project.saved_analyses`; save emits `project_changed`; duplicate name rejected with error label; selecting saved row loads combos (with `blockSignals` preventing re-trigger); delete removes from project and emits `project_changed`; FK result shows envelope table (6 rows, correct DoF labels).
 
-- **`test_gui_main_window.py`** — ✅ C-6 (`f1ffa2c`): **7 cross-panel integration tests** covering `MainWindow` signal routing. Tests call internal handlers directly without starting the background worker. Key tests: FK result → `results_viewer._stack.currentIndex() == 1`; FK result → `point_pair_panel._trial_data is not None`; graph change → `run_panel._frame_a_combo.count()` updated; graph change → `point_pair_panel._frame_a_combo.count()` updated; `_new_project()` → results_viewer back to page 0; `_new_project()` → point_pair_panel._trial_data is None; `_on_run_failed()` → results_viewer stays on page 0.
+- **`test_gui_main_window.py`** — ✅ C-6 (`f1ffa2c`) + feature fix (`ca37d91`): **7 cross-panel integration tests** covering `MainWindow` signal routing. Tests call internal handlers directly without starting the background worker. Key tests: FK result → `results_viewer._stack.currentIndex() == 1`; FK result → `point_pair_panel._trial_data is not None`; graph change → `run_panel._constraint_rows[0]._frame_a_combo.count()` updated (fixed from stale `run_panel._frame_a_combo` reference); graph change → `point_pair_panel._frame_a_combo.count()` updated; `_new_project()` → results_viewer back to page 0; `_new_project()` → point_pair_panel._trial_data is None; `_on_run_failed()` → results_viewer stays on page 0.
 
 **Granular Task List (cross-cutting, beyond what's already specified per-module above):**
 1. ✅ **Done (A6, `83b8ee3`)** Set up `pytest` configuration with a shared `conftest.py` providing reusable fixtures: `two_edge_chain` (root→B→C, 5 mm + 10 mm translation nominals), `three_edge_chain` (Rz=π/4 + 50 mm + zero-tol), `shared_frame_graph` (shared-base multi-branch). No `pytest.ini` was needed — auto-discovery works from the project root. Module-level helpers `make_tol` / `make_zero_tol` / `make_htm` duplicated inline in `test_integration.py` rather than imported from conftest (conftest.py is not directly importable as a Python module in pytest's default discovery mode without additional path config).
@@ -1453,7 +1486,8 @@ All GUI tests use `os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")` at mod
 3. ✅ **Done (A6, `83b8ee3`)** `test_shared_edge_sampling_consistency` implemented as a module-level function in `tests/test_integration.py` (not inside any class), findable by `pytest -k test_shared_edge_sampling_consistency`. Complementary class-based coverage exists in `test_monte_carlo_fk.py::TestSharedEdgeConsistency`, but the required standalone named function is in `test_integration.py` per this spec requirement.
 4. ✅ **Done (A6, `83b8ee3` — placeholder; B2-3 `0c9bd9d` — real implementation)** `test_allocation_mc_validation_discrepancy` in `tests/test_allocation.py`.
 5. ✅ **Done (A6, `83b8ee3`)** `README.md` "Running Tests" section: `source .venv/bin/activate && python -m pytest tests/ -q`. Notes that all tests must pass before GUI work begins (Section 10 rule).
-6. ✅ **Done (C-1 through C-6, commits `67f154e` → `f1ffa2c`)** Six GUI test files (`test_gui_graph_editor.py`, `test_gui_tolerance_editor.py`, `test_gui_run_panel.py`, `test_gui_results_viewer.py`, `test_gui_point_pair_panel.py`, `test_gui_main_window.py`) totaling **72 tests** (19 + 13 + 11 + 11 + 11 + 7). All run headlessly with `QT_QPA_PLATFORM=offscreen`. **`isHidden()` convention (not `isVisible()`) used for all widget visibility assertions** — documented as a project-wide rule for all future GUI test additions.
+6. ✅ **Done (C-1 through C-6, commits `67f154e` → `f1ffa2c`; feature additions `ca37d91`)** Six GUI test files (`test_gui_graph_editor.py`, `test_gui_tolerance_editor.py`, `test_gui_run_panel.py`, `test_gui_results_viewer.py`, `test_gui_point_pair_panel.py`, `test_gui_main_window.py`) totaling **88 tests** (19 + 13 + 19 + 19 + 11 + 7). All run headlessly with `QT_QPA_PLATFORM=offscreen`. **`isHidden()` convention (not `isVisible()`) used for all widget visibility assertions** — documented as a project-wide rule for all future GUI test additions.
+7. ✅ **Done (feature, `ca37d91`)** **`tests/conftest.py` autouse fixture** prevents Qt `MainWindow` hang when consecutive tests each create a `MainWindow` in offscreen mode. `_qt_main_window_test_guard` monkeypatches `_save_settings` and `_restore_settings` to no-ops; `QApplication.processEvents()` called after each test to drain the Qt event loop. Without this fix, the full suite hangs indefinitely after the third `MainWindow` instantiation — root cause: `_set_dirty(True)` → `qtbot closeEvent` → `QMessageBox.question()` → blocks forever in offscreen mode.
 
 **Interfaces:**
 
@@ -1835,5 +1869,6 @@ Because this tool produces engineering decisions about physical hardware toleran
 | 2026-06-28 | Project Owner (request), Claude (implementation) | **Multi-pair IK allocation: `AllocationEngine.solve_multi` / `allocate_multi`.** Extends the IK engine from a single point-pair constraint to simultaneous multiple constraints — e.g., mirror A ↔ B AND mirror A ↔ C — so that tolerance bounds for all edges are optimised jointly rather than independently. **Core algorithm:** for P pairs, build one padded Jacobian per pair (`J_full_p ∈ ℝ^{6 × 6N}` with zero columns for edges not on that pair's path), stack all active (pair, DoF) constraint rows into `A ∈ ℝ^{C × n_free}`, then pass to `LoosestAllocation._run_nlp(A, b)` — the same log-sum NLP that powers single-pair allocation, now with C rows. Shared edges appear in multiple constraint rows, so the optimizer automatically finds the tightest globally-consistent bound without any special handling. **`_run_nlp` extraction:** the NLP core was extracted from `solve()` into a new `LoosestAllocation._run_nlp(A, b)` method shared by both `solve()` and `solve_multi()`. **Multi-pair damping loop (`allocate_multi`):** "failed" = any pair fails MC validation; `gamma` applied uniformly to all free angular bounds; bisection (`_bisect_angular_multi`) validates all pairs simultaneously. **`AllocationResult` additions:** `per_pair_validation: list[tuple[str, str, ValidationReport]] | None` and `per_pair_targets: list[tuple[str, str, ToleranceSpec6]] | None`. **GUI — run panel:** single frame-pair UI replaced by a dynamic `_ConstraintRowWidget` list with "Add Constraint" / "✕" buttons; worker calls `allocate_multi()`. **GUI — results viewer:** per-pair `QGroupBox` sections with pass/fail color in title, and a `DoF | Target ± | Min | Max | Pass?` table per pair so users can directly self-verify achieved vs. requested. **5 new tests** (16 total in `tests/test_allocation.py`): shared-edge correctness, independent-pair isolation, result structure, MC validation with margin, lever-arm multi-pair convergence. Suite: **239 passed** (non-GUI tests). |
 | 2026-06-28 | Project Owner (request), Claude (implementation) | **Asymmetric tolerance bounds (FK mode only): `lower`/`upper` format as an alternative to `±bound`.** Motivated by real-world manufacturing scenarios where a feature has a tighter constraint in one direction than the other (e.g., a clearance hole that must be at least 0.002 mm oversize but can be at most 0.006 mm oversize). IK allocation remains symmetric-only. **`core/tolerance.py`** — `ToleranceSpec` dataclass gains two optional fields `lower: float | None` and `upper: float | None`. In asymmetric mode (both set): `bound` is auto-derived as `max(abs(lower), abs(upper))` in `__post_init__`; the new `is_asymmetric` property returns True; `variance` property extended to compute `E[X²] = Var(X) + E[X]²` for off-centre intervals. `sample()` dispatches to asymmetric samplers when `is_asymmetric`. Mutual-exclusivity enforced: setting only one of lower/upper raises `ValueError`. **`core/sampling.py`** — three new functions: `sample_uniform_asymmetric(lower, upper, n_trials, rng)`, `sample_normal_asymmetric(lower, upper, sigma_level, n_trials, rng)` (mean = midpoint, sigma = half-width / sigma_level), and `sample_asymmetric(distribution, lower, upper, sigma_level, n_trials, rng)` dispatcher. **`persistence/schema.py`** — `ToleranceSpecModel` gains `lower: float | None` and `upper: float | None` with `@model_validator(mode="after")` cross-field validation; `_tol_to_model` / `_model_to_tol` conversion helpers updated to preserve and restore asymmetric fields. **`postprocess/stats.py`** — `compute_tolerance_sensitivities` updated to use `spec.variance` (handles both symmetric and asymmetric correctly) instead of the inline symmetric-only formula. **`gui/tolerance_editor/tolerance_editor_widget.py`** — `_DofRow` gains a mode toggle button (`±` / `↔`), a `QStackedWidget` in the bound column (page 0: single `bound_spin`; page 1: `lower_spin` + `upper_spin` with grey "min"/"max" labels). Mode switch pre-populates the opposite representation from current values. **49 new tests** across `tests/test_tolerance.py` (17 new), `tests/test_schema.py` (7 new), `tests/test_gui_tolerance_editor.py` (8 new). Suite: **282 passed** (non-GUI), **302 passed** (full). Committed as `aac8cef`. |
 | 2026-06-28 | Claude (bug fix) | **NameError in `allocate_multi` non-convergence path.** The non-convergence `return` branch of `AllocationEngine.allocate_multi()` referenced the undefined variable `method_name` (a stale remnant from the multi-objective era) instead of the hardcoded string `"LoosestAllocation"`. This caused a `NameError` whenever `allocate_multi` exhausted `max_iter` without converging. Fix: replaced `method=method_name` with `method="LoosestAllocation"` in the non-convergence return. Regression test `test_allocate_multi_non_convergence_returns_method_field` added to `tests/test_allocation.py` — forces the non-convergence branch with an impossibly tight target and verifies `result.method == "LoosestAllocation"` (was `NameError` before the fix). Committed as `805fec1`. |
+| 2026-06-29 | Project Owner (request), Claude (implementation + tests) | **"Apply Corrected Allocation to Project" button + IK simulation parameter persistence.** Two features implemented on feature branch `feature/apply-allocation-persist-ik-params` (commit `ca37d91`), merged to `main`. **(1) Apply Allocation button** (`gui/results_viewer/`): after a converged IK run, a new `QPushButton("Apply Corrected Allocation to Project…")` (enabled only when `result.converged`) lets the user write `corrected_allocation` bounds back to the project's edge tolerance specs. `_on_apply_clicked()` builds a preview of all changes, shows a `QMessageBox.question()` confirmation dialog, then writes `ToleranceSpecModel(distribution="uniform", bound=spec.bound)` for each non-locked DoF on matching edges. Emits the new `project_changed = Signal()` on `ResultsViewerWidget` after writing; `MainWindow._on_allocation_applied()` sets the dirty flag and calls `_tolerance_editor.refresh_view()` so the written bounds appear immediately. **(2) IK parameter persistence** (`persistence/schema.py`, `gui/run_panel/`): added `IKConstraintModel(frame_a, frame_b, target: ToleranceSpec6Model)` and extended `SimSettingsModel` with `ik_constraints: list[IKConstraintModel] = []` and `ik_max_iter: int = 30`. Both fields default safely so existing project files load unchanged. `_load_ik_constraints_from_project()` / `_save_ik_constraints_to_project()` in `RunPanelWidget` rebuild constraint rows from or write them to `project.sim_settings`; `_on_constraints_changed()` and `_on_max_iter_changed()` keep the project in sync on every UI edit. `validate_references()` in `ProjectModel` extended to check IK constraint frame references. **(Test suite):** 71 new tests (6 in `test_schema.py` for `IKConstraintModel`; 8 in `test_gui_run_panel.py` for constraint persistence; 8 in `test_gui_results_viewer.py` for apply-button; 1 fixed in `test_gui_main_window.py`; plus 2 pre-existing broken tests fixed). **`tests/conftest.py` autouse fixture** added to prevent Qt `MainWindow` hang in consecutive tests (root cause: `_set_dirty(True)` → `closeEvent` → `QMessageBox.question()` blocking forever in offscreen mode). **Suite: 373 passed, 0 skipped.** |
 | 2026-06-28 | Project Owner (report), Claude (root-cause and fix) | **IK allocation convergence failure when locked DoFs have asymmetric (min/max) tolerances.** **Root cause:** `LoosestAllocation.solve()` built the NLP constraint as `Σ_free |J[k,col]| · b[col] ≤ B[k]` where `B[k] = target[k].bound` — the full target budget. This ignored the contribution of locked DoFs to the MC output envelope entirely. For symmetric locked DoFs with small bounds, the damping loop compensated iteratively. For asymmetric locked DoFs, `spec.bound = max(|lower|, |upper|)` can be significantly larger than a naive symmetric bound, so the NLP over-allocated free DoFs by a wider margin and the damping loop (which only scales free angular DoFs) could not recover — the locked contribution is fixed and unaffected by angular damping. **Fix — two changes to `sim/allocation.py`:** (1) New private helper `_compute_locked_budget(frame_graph, frame_a, frame_b, path, free_edges, J_free) → np.ndarray (6,)` computes `Σ_locked |J[k,col]| · spec.bound` for every locked DoF on the path. Handles two classes: locked DoF within partially-free edges (columns present in `J_free` but outside `free_mask`) and fully-locked path edges (absent from `J_free` entirely, handled by a second `compute_sensitivity` call). (2) `LoosestAllocation.solve()` gains a `locked_budget: np.ndarray | None = None` parameter; the NLP budget is now `b_eff[k] = max(0, B[k] - locked_budget[k])` rather than `B[k]`. Both `AllocationEngine.solve()` and `AllocationEngine.solve_multi()` compute `locked_budget` via the helper and pass it through. `solve_multi()` also now stores the path per pair (new `pair_paths` list) so `_compute_locked_budget` can find fully-locked edges without recomputing the path. **Backwards compatibility:** existing setups where all locked DoFs have `bound=0` see `locked_budget = [0,…,0]` and behaviour is unchanged — all 17 existing allocation tests pass unmodified. **Practical effect:** the baseline NLP allocation is now accurate enough that MC validation passes on the first attempt (0 damping iterations) for the common case where locked DoF contributions are properly budgeted. Regression test `test_ik_convergence_with_asymmetric_locked_dofs` added (18th test in `tests/test_allocation.py`): verifies both the exact linear allocation (`e1.dx.bound == target - locked_contrib`) and that `allocate()` converges with `iterations_used=0`. Suite: **270 passed** (non-GUI). |
 
