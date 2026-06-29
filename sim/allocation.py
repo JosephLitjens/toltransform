@@ -17,10 +17,9 @@ from scipy.optimize import Bounds, LinearConstraint, minimize
 
 from core.frame_graph import FrameGraph, compute_sensitivity
 from core.tolerance import ToleranceSpec, ToleranceSpec6
-from postprocess.stats import point_pair_envelope_box
+from postprocess.stats import DOF_LABELS, point_pair_envelope_box
 from sim.monte_carlo_fk import MonteCarloFKEngine
 
-DOF_LABELS = ["dx", "dy", "dz", "rx", "ry", "rz"]
 _ANGULAR_INDICES = (3, 4, 5)  # rx, ry, rz within a 6-vector
 
 

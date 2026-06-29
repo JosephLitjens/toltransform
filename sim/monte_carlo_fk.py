@@ -25,6 +25,13 @@ from core.tolerance import apply_perturbation_batch
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _spawn_key(edge_name: str) -> int:
+    """Deterministic integer spawn key for an edge name (used in edge_seed_log)."""
+    return int.from_bytes(
+        hashlib.sha256(edge_name.encode()).digest()[:8], "little"
+    )
+
+
 def make_edge_rng(master_seed: int, edge_name: str) -> np.random.Generator:
     """Return a deterministic per-edge RNG derived from (master_seed, edge_name).
 
@@ -40,17 +47,7 @@ def make_edge_rng(master_seed: int, edge_name: str) -> np.random.Generator:
     np.random.Generator
         A fresh generator whose stream depends only on (master_seed, edge_name).
     """
-    spawn_key = int.from_bytes(
-        hashlib.sha256(edge_name.encode()).digest()[:8], "little"
-    )
-    return np.random.default_rng(np.random.SeedSequence([master_seed, spawn_key]))
-
-
-def _spawn_key(edge_name: str) -> int:
-    """Deterministic integer spawn key for an edge name (used in edge_seed_log)."""
-    return int.from_bytes(
-        hashlib.sha256(edge_name.encode()).digest()[:8], "little"
-    )
+    return np.random.default_rng(np.random.SeedSequence([master_seed, _spawn_key(edge_name)]))
 
 
 # ── Data structure ────────────────────────────────────────────────────────────
@@ -127,8 +124,7 @@ class MonteCarloFKEngine:
         for edge_name in frame_graph.topological_edge_order():
             edge = frame_graph._edges[edge_name]
 
-            key = _spawn_key(edge_name)
-            edge_seed_log[edge_name] = key
+            edge_seed_log[edge_name] = _spawn_key(edge_name)
             rng = make_edge_rng(seed, edge_name)
 
             delta_batch = edge.tolerance.sample(n_trials, rng)              # (N,6)
