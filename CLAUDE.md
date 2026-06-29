@@ -60,14 +60,14 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** Codebase cleanup — branch `fix/codebase-cleanup` in progress (not yet merged to main).
-- **Suite: 373 passed** (full suite including GUI).
-- **Next task:** Finalize remaining cleanup items (see branch), get user approval, then merge to main.
+- **Current milestone:** Post-milestone. All milestones A → B-1 → B-2 → C → D complete. No planned work outstanding.
+- **Suite: 373 passed, 0 skipped** (full suite including GUI).
+- **Next task:** None — awaiting new feature requests or bug reports.
 
-**Recent history (merged to main as of 2026-06-29):**
-- `feature/apply-allocation-persist-ik-params` (commit `f5a3a33`): Apply Allocation button + persist IK params.
+**Last completed work (merged to main 2026-06-29):**
+- `fix/codebase-cleanup`: Full codebase audit and cleanup pass (14 categories, 7 commits). See Section 11 changelog for details.
+- `feature/apply-allocation-persist-ik-params`: Apply Allocation button + persist IK params.
 - `feature/asymmetric-tolerances`: Asymmetric tolerance bounds + NameError fix + locked-DoF budget fix.
-- All milestones A → B-1 → B-2 → C → D complete.
 
 **✅ Multi-pair IK allocation complete (merged to main 2026-06-28):**
 - `AllocationEngine.solve_multi(fg, targets)` — builds stacked padded Jacobian `A ∈ ℝ^{C × n_free}` from all P pairs' paths; calls `LoosestAllocation._run_nlp(A, b)` to find globally-consistent per-DoF bounds. Shared edges appear in multiple constraint rows and are automatically constrained by the tightest binding pair.
