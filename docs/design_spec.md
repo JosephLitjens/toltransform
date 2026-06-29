@@ -199,7 +199,7 @@ A secondary, optional, **fast analytical worst-case estimate** (linear/Jacobian-
 
 **Locked edges:** Any edge (or specific DoF on an edge) the user marks as `locked` is excluded from the free-variable vector in step 2 above and is treated as a fixed, known contribution to the budget. This supports the real-world case where some interfaces are already fixed by an existing/selected component.
 
-**Allocation objective extensibility:** The allocation objective is implemented behind a small interface (`AllocationObjective`) with exactly one built-in implementation (`EqualAllocation`) for v1. This costs almost nothing architecturally and avoids a rewrite if a weighted or cost-based objective is wanted later — but **do not build additional objectives speculatively; YAGNI until requested.**
+**Allocation objective:** `LoosestAllocation` (log-sum NLP) is the sole allocation objective. It maximises each free DoF's tolerance bound independently subject to the linear worst-case output-envelope constraints, guaranteeing no zero bounds even under Jacobian cross-coupling. Earlier `EqualAllocation` (worst-case linear sum) and `RSSAllocation` (statistical RSS) implementations were removed on 2026-06-28 — both collapsed to a single global scale factor that suppressed independent DoFs unnecessarily.
 
 ## 3.3 Point-Pair Post-Processing (Available in Both Modes)
 
@@ -214,7 +214,7 @@ After any Monte Carlo run (FK or the validation step of IK), the user may select
 | **NumPy** | All numerical arrays, vectorized Monte Carlo trial batches | Standard; vectorize trials as batched `(N,4,4)` array ops, never loop over trials in Python |
 | **pytransform3d** | HTM <-> euler/quaternion/screw/axis-angle conversions | Battle-tested, avoids hand-rolled convention/edge-case bugs. **Do not use its perturbation/composition conventions for the tolerance model** — our local-frame right-multiply small-angle perturbation (Section 2.2.2) is bespoke and must be hand-implemented/tested |
 | **NetworkX** | Frame graph: DAG validation, cycle detection, path-finding between arbitrary Frames | Avoids hand-written graph traversal code; directly supports Section 2.3 |
-| **SciPy** | `scipy.stats` for sampling distributions (uniform, normal incl. sigma-level conversion); `scipy.optimize` as the extensibility hook for `AllocationObjective` implementations beyond v1's closed-form equal allocation | Standard, reliable |
+| **SciPy** | `scipy.stats` for sampling distributions (uniform, normal incl. sigma-level conversion); `scipy.optimize.minimize` (trust-constr) + `LinearConstraint` + `Bounds` for the `LoosestAllocation` log-sum NLP | Standard, reliable |
 | **Pydantic** | Project file schema, validation on load (catches cycles, missing frame references, malformed tolerance specs with clear error messages before the engine ever runs) | Validation-by-construction; good error UX |
 | **Matplotlib** | All plots: histograms, bounding-shape wireframes (box/ellipsoid/cone), 2D projections | Standard, embeds cleanly in PySide6 |
 | **PySide6** | GUI framework (V1.0 only — not needed for V0.5) | Native desktop, no browser/server split, mature Matplotlib embedding, good file dialogs — matches "simple, reliable, local" requirement |
@@ -244,8 +244,7 @@ toltransform/
 ├── sim/
 │   ├── monte_carlo_fk.py   # Forward verification engine: batched sampling + chain composition;
 │   │                       #   owns TrialData and per-edge RNG sub-stream derivation
-│   └── allocation.py       # Inverse allocation engine: Jacobian/sensitivity + EqualAllocation
-│                           #   objective + MC validation pass
+│   └── allocation.py       # Inverse allocation engine: LoosestAllocation NLP + MC validation
 ├── postprocess/
 │   ├── stats.py            # Per-Frame and per-point-pair envelope stats: box, percentiles, sigma
 │   ├── bounding_shapes.py  # Bounding box / ellipsoid / sphere (translation), bounding cone (rotation)
@@ -286,7 +285,7 @@ This is a conceptual sketch to align understanding; actual implementation will b
 - **`HTMEdge`** (`core/frame_graph.py`): `parent_frame`, `child_frame`, `nominal: HTM`, `tolerance: ToleranceSpec6`.
 - **`FrameGraph`** (`core/frame_graph.py`): wraps a NetworkX `DiGraph`. Methods: `add_frame`, `add_edge`, `validate_dag()`, `path_between(frame_a, frame_b)`, `relative_transform_nominal(frame_a, frame_b)`.
 - **`MonteCarloFKEngine`** (`sim/monte_carlo_fk.py`): `run(frame_graph, n_trials, rng_seed) -> TrialData`, where `TrialData` stores, for every Frame, an `(n_trials, 4, 4)` array of absolute pose per trial (locked decision: full 4x4, not reduced 6-vector — see Section 6) — vectorized, no per-trial Python loop. This module also owns per-edge RNG sub-stream derivation (Section 6.6).
-- **`AllocationEngine`** (`sim/allocation.py`): `solve(frame_graph, target_frame_pair, target_tolerance, objective=EqualAllocation()) -> ProposedToleranceSet`, plus `validate(proposed_set, n_trials) -> ValidationReport`.
+- **`AllocationEngine`** (`sim/allocation.py`): `solve(frame_graph, frame_a, frame_b, target_tolerance) -> dict[str, ToleranceSpec6]` (single-pair, LoosestAllocation), `solve_multi(frame_graph, targets) -> dict` (multi-pair), `allocate(...)` and `allocate_multi(...)` (with MC damping loop), plus `validate(proposed_set, frame_a, frame_b, n_trials, seed) -> ValidationReport`.
 - **`BoundingShapeFitter`** (`postprocess/bounding_shapes.py`): takes an `(n_trials, 3)` translation point cloud or `(n_trials, 3)` rotation-vector cloud, returns box/ellipsoid/cone parameters.
 
 ## 5.3 GUI-Engine Decoupling Principle (V1.0)
@@ -625,7 +624,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Deliverables:**
 
-- `AllocationObjective` interface with three implementations: `EqualAllocation` (worst-case linear sum), `RSSAllocation` (statistical RSS), and **`LoosestAllocation`** (log-sum NLP — the default) — see Step 8 below for the full mathematical treatment of `LoosestAllocation`
+- **`LoosestAllocation`** — the sole allocation objective; log-sum NLP (`maximize Σ log(b_ij)`) subject to linear worst-case output-envelope constraints — see Step 8 below for the full mathematical treatment. `EqualAllocation` and `RSSAllocation` were removed on 2026-06-28.
 - `_build_result(free_edges, bounds: np.ndarray)` — internal helper that assembles `dict[str, ToleranceSpec6]` from a per-DoF bounds vector of shape `(6*N,)`; replaces the earlier scalar version that could only express a uniform allocation
 - `AllocationEngine.allocate(...)` — single-pair entry point, wrapping the baseline linear solve in an **iterative nonlinear damping/correction loop** with binary-search angular refinement
 - `AllocationEngine.allocate_multi(targets: list[tuple[str, str, ToleranceSpec6]], ...)` — **multi-pair entry point**: optimises per-DoF bounds subject to ALL specified point-pair constraints simultaneously; see Step 9 for full treatment
@@ -635,15 +634,14 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 
 **Granular Task List:**
 
-1. **Sensitivity derivation — relocated this revision (Mod 2, cross-review):** `compute_sensitivity()` and its underlying `adjoint()` helper now live in `core/frame_graph.py` (Section 6.3, Step 13), not here — both `sim/allocation.py` and `postprocess/stats.py`'s new Pareto sensitivity breakdown (Section 6.8) call the same shared primitive, so the math is implemented exactly once. This module's job is to call `frame_graph.path_edges_between(frame_a, frame_b)` to get the relevant edges, then `compute_sensitivity(frame_graph, frame_a, frame_b, free_edge_names)` to get the `(6, 6*len(free_edge_names))` sensitivity matrix used by `EqualAllocation.solve()` (Step 3) — do not re-implement the adjoint transform here.
-2. Implement the `AllocationObjective` abstract interface: a `solve(sensitivity_matrix, target_bound_vector, free_edge_names) -> dict[edge_name, ToleranceSpec6]` method signature, to allow future objectives beyond v1's `EqualAllocation` without changing the calling code in `AllocationEngine`.
-3. Implement `EqualAllocation(AllocationObjective)`: solves for a single uniform scale factor `s` applied to all free edges' (currently-unset or placeholder) per-DoF bounds such that the linear worst-case sum of contributions (via the sensitivity matrix from Step 1) equals the target bound, per DoF. This reduces to a simple linear equation per target DoF (closed-form, no iterative optimizer needed for v1) — document the exact formula once derived, including how multiple target DoF constraints are reconciled into a single scale factor (e.g., take the most restrictive/binding DoF, or solve a small least-squares system — **decide and document explicitly once this task is reached; flag as an open implementation decision for the Milestone B-2 session that builds this module**).
-4. Implement `AllocationEngine.solve(frame_graph, frame_a, frame_b, target_tolerance: ToleranceSpec6, objective=EqualAllocation()) -> dict[edge_name, ToleranceSpec6]`:
+1. **Sensitivity derivation — relocated (Mod 2, cross-review):** `compute_sensitivity()` and its underlying `adjoint()` helper now live in `core/frame_graph.py` (Section 6.3, Step 13). This module's job is to call `frame_graph.path_edges_between(frame_a, frame_b)` to get the relevant edges, then `compute_sensitivity(frame_graph, frame_a, frame_b, free_edge_names)` to get the `(6, 6*len(free_edge_names))` sensitivity matrix — do not re-implement the adjoint transform here.
+2. ~~Implement the `AllocationObjective` abstract interface.~~ **(Superseded 2026-06-28)** `AllocationObjective` ABC and `EqualAllocation`/`RSSAllocation` implementations were removed. `LoosestAllocation` is the sole objective and is called directly — no interface indirection.
+3. ~~Implement `EqualAllocation(AllocationObjective)`.~~ **(Superseded 2026-06-28)** Removed. Equal allocation collapsed all DoFs to a single scale factor `s = min_k(B_k / Σ|J[k,free]|)`, suppressing structurally independent DoFs unnecessarily.
+4. Implement `AllocationEngine.solve(frame_graph, frame_a, frame_b, target_tolerance: ToleranceSpec6) -> dict[edge_name, ToleranceSpec6]` *(no `objective` parameter — LoosestAllocation always used)*:
    - Identify all edges on the path between `frame_a` and `frame_b` via `frame_graph.path_edges_between(frame_a, frame_b)` (Section 6.3, Step 12).
    - Partition into free (unlocked) and locked edges.
-   - Compute locked edges' fixed contribution to the budget (their existing `ToleranceSpec6` propagated through the same `compute_sensitivity()` primitive, Section 6.3).
-   - Call `objective.solve(...)` on the remaining free-edge budget.
-   - Return the full proposed per-edge `ToleranceSpec6` set (locked edges unchanged, free edges populated per the objective's solution).
+   - Compute `compute_sensitivity()` for the free edges, build the constraint matrix `(A, b)`, call `LoosestAllocation._run_nlp(A, b)`.
+   - Return the full proposed per-edge `ToleranceSpec6` set (locked edges unchanged, free edges populated with the NLP solution).
 5. **Iterative nonlinear damping/correction loop (locked decision, this revision):** Long serial chains with high-leverage joints exhibit meaningful geometric cross-coupling (`dx ≈ L·θ` — a small angular tolerance on an upstream joint sweeps a large positional arc by the time it reaches a distant downstream Frame). The closed-form linear allocation from Steps 1–4 does not account for this, and can produce an allocation that passes the linear sensitivity math but fails nonlinear Monte Carlo validation. `AllocationEngine.allocate()` is the top-level method that wraps `solve()` and `validate()` in a correction loop to address this:
    a. Call `solve(...)` (Steps 1–4) to produce the **baseline linear allocation**. Retain this unmodified — it is never overwritten (Step 5e).
    b. Call `validate(frame_graph, baseline_allocation, frame_a, frame_b, n_trials=1000, seed)` (Step 6) — a deliberately low-overhead `N_validate = 1000`-trial Monte Carlo pass, fast enough to run on every loop iteration without materially slowing down an interactive allocation workflow.
@@ -661,7 +659,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
       ├── status_message: str | None   # set to the locked non-convergence string on failure, else None
       ├── final_validation_report: ValidationReport                # from the last validate() call in the loop
       ├── target_tolerance: ToleranceSpec6 | None                  # echoed for display in results viewer
-      └── method: str                                              # type(objective).__name__, e.g. "RSSAllocation"
+      └── method: str                                              # always "LoosestAllocation"
       ```
       The explicit preservation of both allocations is intentional and load-bearing: the *difference* between the baseline and corrected allocations is itself a direct, quantitative diagnostic of how much geometric-leverage coupling exists in the user's chain.
 6. Implement `AllocationEngine.validate(frame_graph, proposed_tolerances, frame_a, frame_b, n_trials, seed) -> ValidationReport`:
@@ -671,7 +669,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
    - Compare achieved vs. target per DoF; populate a `ValidationReport` with both values and the discrepancy (absolute and percentage), and a per-DoF pass/fail flag (consumed directly by Step 5's loop termination check).
 7. Write `tests/test_allocation.py`:
    - **Sensitivity primitive correctness:** not re-derived here — `compute_sensitivity()`'s finite-difference cross-check now lives in `tests/test_frame_graph.py` (Section 6.3, Step 14), since the primitive itself was relocated there this revision. This module's tests assume that primitive is already validated and focus on allocation-specific behavior below.
-   - **Equal-allocation sanity check:** simple 2–3 edge chain, all free, confirm the solved baseline tolerances are indeed equal (or equally scaled) across edges per the objective's definition.
+   - **`solve()` sanity check** (`test_solve_returns_all_free_edges`): simple 3-edge identity chain with symmetric target — confirms `solve()` returns exactly the free edges and, by symmetry, gives equal bounds across edges.
    - **Locked-edge case:** one edge locked to a known value, confirm the solver only adjusts the free edges and correctly accounts for the locked edge's fixed contribution.
    - **All-edges-locked edge case:** confirm the solver detects an infeasible/over-constrained situation (no free edges to solve for) and raises a clear, specific error rather than silently returning a meaningless result.
    - **MC validation discrepancy reporting:** confirm `validate()` correctly flags a case where the linear allocation under- or over-shoots the nonlinear MC-validated result (construct a case with deliberately large nominal rotation offsets between edges to induce a meaningful nonlinearity, since pure small-angle propagation through near-zero nominal offsets may not exercise this path).
@@ -679,9 +677,9 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
    - **Damping loop non-convergence test (new, locked decision):** construct a deliberately infeasible target (e.g., an unreasonably tight target on a chain with most edges locked) and confirm `allocate()` returns `converged=False` with `status_message == "Allocation could not converge to target budget"` after exactly `max_iter` iterations, without raising an uncaught exception.
    - **LoosestAllocation tests (new, this revision):** see Step 8 below.
 
-8. ✅ **Done (2026-06-28)** — `LoosestAllocation(AllocationObjective)`: log-sum NLP for per-DoF loosest allocation.
+8. ✅ **Done (2026-06-28)** — `LoosestAllocation`: log-sum NLP for per-DoF loosest allocation. *(Note: `AllocationObjective` ABC and `EqualAllocation`/`RSSAllocation` removed 2026-06-28 — see Step 8 history and changelog.)*
 
-   **Why EqualAllocation / RSSAllocation are suboptimal.**  Both prior objectives collapse the allocation problem to a single global scale factor `s` applied uniformly to every free DoF on every edge.  The binding constraint is the output DoF that gives the smallest `s_k`:
+   **Why single-scale-factor methods are suboptimal.**  `EqualAllocation` and `RSSAllocation` (the earlier implementations, now removed) collapsed the allocation problem to a single global scale factor `s` applied uniformly to every free DoF on every edge.  The binding constraint was the output DoF that gave the smallest `s_k`:
 
    ```
    EqualAllocation:   s_k = B_k / Σ_{free (i,j)} |J[k, 6i+j]|
@@ -748,15 +746,15 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
    # → mid.b_rz = lo_original.b_rz × (new_mid / lo_original.b_rz) = new_mid  ✓
    ```
 
-   This bug was latent because `_bisect_angular` is only called when the damping loop finds a passing iteration, and for equal-allocation (all angular bounds equal) the first bisection iteration usually meets the 0.5% tolerance criterion immediately — leaving no subsequent iterations during which the wrong `lo_scale` update could manifest.  With `LoosestAllocation`, heterogeneous bounds mean more bisection iterations are common, making the bug visible.
+   This bug was latent because `_bisect_angular` is only called when the damping loop finds a passing iteration, and when all angular bounds are equal the first bisection iteration usually meets the 0.5% tolerance criterion immediately.  With `LoosestAllocation`, heterogeneous bounds mean more bisection iterations are common, making the bug visible.
 
-   **`_build_result` refactor (locked, this revision).**  The helper that assembles per-edge `ToleranceSpec6` dicts was previously `_build_result(free_edges, s: float)` — a single scalar applied uniformly.  Refactored to `_build_result(free_edges, bounds: np.ndarray)` where `bounds` is shape `(6*N,)` with one entry per `(edge, DoF)`.  `EqualAllocation` and `RSSAllocation` construct a uniform `np.full(6*N, s)` array and call the new signature; `LoosestAllocation` passes the NLP solution vector directly.
+   **`_build_result` refactor (locked, this revision).**  The helper that assembles per-edge `ToleranceSpec6` dicts was previously `_build_result(free_edges, s: float)` — a single scalar applied uniformly.  Refactored to `_build_result(free_edges, bounds: np.ndarray)` where `bounds` is shape `(6*N,)` with one entry per `(edge, DoF)`.  `LoosestAllocation` passes the NLP solution vector directly.
 
-   **Tests for LoosestAllocation (4 new, in `tests/test_allocation.py`):**
-   - `test_loosest_allocation_beats_equal_on_mixed_target`: 2-edge identity chain, `B_dx = 0.01` / `B_rz = 10.0`.  Asserts `Σ LP_rz > 50 × Σ Equal_rz` (LP fills the rz budget; equal allocation wastes it).
-   - `test_loosest_allocation_mc_validation_passes`: simple 3-edge chain, LP allocation with modest target; validate with 50% margin check target — confirms LP result is feasible under MC.
-   - `test_loosest_allocation_no_zero_bounds_on_coupled_chain` **(regression test, critical)**: single-edge chain with `Ry(π/2)` nominal — this rotation creates Jacobian cross-coupling between ry and rz inputs in the ry-output row.  Asserts all 6 per-DoF bounds `> 1e-6`.  This test would have failed with the original LP.
-   - `test_loosest_allocation_lever_arm_converges`: `LoosestAllocation` + damping loop on the lever-arm chain — confirms the NLP + correction loop pipeline converges end-to-end.
+   **Tests for LoosestAllocation (in `tests/test_allocation.py`):**
+   - `test_solve_fills_independent_dof_budgets`: 2-edge identity chain, `B_dx = 0.01` / `B_rz = 10.0`. Asserts the tight dx constraint does not drag rz down — both constraints are filled to their own limits independently.
+   - `test_loosest_allocation_mc_validation_passes`: simple 3-edge chain, `solve()` result validated at 1.5× target (50% margin) — confirms the NLP output is feasible under MC.
+   - `test_loosest_allocation_no_zero_bounds_on_coupled_chain` **(regression test, critical)**: single-edge chain with `Ry(π/2)` nominal — Jacobian cross-coupling between ry and rz inputs.  Asserts all 6 per-DoF bounds `> 1e-6`.  This test fails with a naive linear-sum LP (vertex degeneracy) and passes with the log-sum NLP.
+   - `test_loosest_allocation_lever_arm_converges`: `solve()` + damping loop on the lever-arm chain — confirms the NLP + correction loop pipeline converges end-to-end.
 
 9. ✅ **Done (2026-06-28)** — `AllocationEngine.solve_multi` / `allocate_multi`: simultaneous multi-pair IK allocation.
 
@@ -822,22 +820,17 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - *Used by:* `gui/run_panel/` and `gui/results_viewer/`.
 - *Public API (conceptual):*
   ```
-  AllocationObjective.solve(sensitivity_matrix, target_tolerance, free_edges) -> dict
-  EqualAllocation(AllocationObjective)    # worst-case linear sum, single scale factor
-  RSSAllocation(AllocationObjective)      # statistical RSS, single scale factor
-  LoosestAllocation(AllocationObjective)  # log-sum NLP, per-DoF bounds (DEFAULT)
+  LoosestAllocation   # sole allocation objective: log-sum NLP, per-DoF bounds
 
-  AllocationEngine.solve(frame_graph, frame_a, frame_b, target_tolerance,
-                          objective=EqualAllocation()) -> dict[str, ToleranceSpec6]
-  AllocationEngine.solve_multi(frame_graph, targets: list[tuple[str, str, ToleranceSpec6]],
-                                objective=LoosestAllocation()) -> dict[str, ToleranceSpec6]
+  AllocationEngine.solve(frame_graph, frame_a, frame_b,
+                          target_tolerance) -> dict[str, ToleranceSpec6]
+  AllocationEngine.solve_multi(frame_graph,
+                                targets: list[tuple[str, str, ToleranceSpec6]]) -> dict[str, ToleranceSpec6]
   AllocationEngine.validate(frame_graph, proposed_tolerances, frame_a, frame_b,
                              n_trials, seed) -> ValidationReport
   AllocationEngine.allocate(frame_graph, frame_a, frame_b, target_tolerance,
-                             objective=LoosestAllocation(),
                              n_validate=1000, gamma=0.9, max_iter=30, seed=...) -> AllocationResult
   AllocationEngine.allocate_multi(frame_graph, targets: list[tuple[str, str, ToleranceSpec6]],
-                                   objective=LoosestAllocation(),
                                    n_validate=1000, gamma=0.9, max_iter=30, seed=...) -> AllocationResult
 
   AllocationResult(baseline_linear_allocation, corrected_allocation, converged,
@@ -1262,22 +1255,21 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - **Mode selector** (`QComboBox`): "FK Verification" (`"fk_verification"`) and "IK Allocation" (`"ik_allocation"`). IK group (`self._ik_group`) is hidden when FK mode is active.
 - **SimSettings write-back**: mode, n_trials, and seed changes call `_on_mode_changed()` / `_on_n_trials_changed()` / `_on_seed_changed()` which update `project.sim_settings.*` in place and emit `project_changed`.
 - **Randomize button**: sets seed to `random.randint(0, 2**31 - 1)`.
-- **IK target group**: Frame A/B combos + **Method combo** (`_method_combo`: "Statistical (RSS)" / "Worst-Case (Linear Sum)") + **Max iterations spinbox** (`_max_iter_spin`, default 30, range 1–500) + 6 `QDoubleSpinBox` target bounds per DoF. Frame combos refreshed by `refresh_view()` when the graph changes.
+- **IK target group**: dynamic list of `_ConstraintRowWidget` instances (Frame A/B combos + 6 DoF spinboxes each) + "Add Constraint" / "✕ Remove" buttons + **Max iterations spinbox** (`_max_iter_spin`, default 30, range 1–500). Frame combos refreshed by `refresh_view()` when the graph changes. No method selector — `LoosestAllocation` is always used.
 - **Run flow** (`_on_run_clicked()`):
   1. Guard: no edges → error status, return.
   2. IK guard: A==B or empty → error status, return.
   3. `project_model_to_frame_graph(self._project)` — the only schema→core conversion in the GUI.
-  4. Select objective: `RSSAllocation()` (default) or `EqualAllocation()` per method combo.
-  5. Disable Run button, show indeterminate progress bar, set status "Running…".
-  6. Construct `_RunWorker` with mode, graph, n_trials, seed, frame_a/b, target_tol, objective, max_iter.
-  7. `worker.start()`.
-- **_RunWorker.run()**: dispatches to `MonteCarloFKEngine.run()` (FK) or `AllocationEngine.allocate()` (IK with `n_validate=1000, seed=seed, max_iter=self._max_iter`). Emits `finished(result)` or `failed(str(exc))`.
+  4. Disable Run button, show indeterminate progress bar, set status "Running…".
+  5. Construct `_RunWorker` with mode, graph, n_trials, seed, ik_targets list, max_iter.
+  6. `worker.start()`.
+- **_RunWorker.run()**: dispatches to `MonteCarloFKEngine.run()` (FK) or `AllocationEngine.allocate_multi()` (IK with `n_validate=1000, seed=seed, max_iter=self._max_iter`). Emits `finished(result)` or `failed(str(exc))`.
 - **Completion** (`_on_run_finished()`): re-enables Run button, hides progress bar, emits `run_completed(result)`.
 - All content in `QScrollArea(widgetResizable=True, frameShape=NoFrame)`.
 
 **Interfaces:**
 
-- *Depends on:* `persistence/schema.py` (`project_model_to_frame_graph`), `core/tolerance.py` (`ToleranceSpec`, `ToleranceSpec6`), `sim/monte_carlo_fk.py` (`MonteCarloFKEngine`), `sim/allocation.py` (`AllocationEngine`, `EqualAllocation`, `RSSAllocation`), `PySide6.QtCore.QThread`.
+- *Depends on:* `persistence/schema.py` (`project_model_to_frame_graph`), `core/tolerance.py` (`ToleranceSpec`, `ToleranceSpec6`), `sim/monte_carlo_fk.py` (`MonteCarloFKEngine`), `sim/allocation.py` (`AllocationEngine`, `AllocationResult`), `PySide6.QtCore.QThread`.
 - *Used by:* `gui/main_window.py`.
 - *Public API:*
   ```
@@ -1303,7 +1295,7 @@ Per Section 2.4/2.5 and the decisions locked this session: pose data is stored a
 - `ResultsViewerWidget(QWidget)` — `QStackedWidget` with three pages: placeholder (page 0), FK page (page 1), IK page (page 2).
 - `_FigureWindow(QWidget)` — standalone OS window hosting a Matplotlib `FigureCanvasQTAgg`; closed via `plt.close(fig)` on `closeEvent`.
 - FK page: frame selector combo → envelope table (6×3 DoF/Min/Max); "Open Frame Report in New Window" button (disabled until FK result arrives); Pareto sensitivity group (Frame A/B combos + "Compute & Open" button).
-- IK page: convergence status label (green/orange) with method name appended (e.g. `[Statistical (RSS)]`); corrected allocation table (edge × DoF, locked DoF shown as `"—"` in gray, tooltip showing baseline bound on changed cells); achieved envelope vs. target table (5 columns: DoF / **Target ±** / Min / Max / Pass?) with pass cells in green/red.
+- IK page: convergence status label (green/orange) with `[Loosest (LP)]` appended; per-pair `QGroupBox` sections (pass/fail title color) each containing a `DoF | Target ± | Min | Max | Pass?` table; corrected allocation table (edge × DoF, locked DoF as `"—"` in gray, tooltip showing baseline bound on damped cells).
 
 **Implemented Architecture:**
 
@@ -1723,7 +1715,7 @@ Recorded here so they are not forgotten, but also not accidentally started early
 
 - Convex-hull (non-axis-aligned) bounding shapes for translation point clouds (v1.x nice-to-have)
 - Fast analytical (non-Monte-Carlo) linear worst-case estimate as a quick sanity-check shortcut (v1.x nice-to-have)
-- Allocation objectives beyond `EqualAllocation` (e.g., cost-weighted allocation)
+- Alternative allocation objectives (e.g., cost-weighted, min-sensitivity) — `LoosestAllocation` is the sole current objective; a cost-weighted variant would be the most natural addition
 - True 3D rotatable bounding-shape viewer (v1.0 uses 2D projections only, by explicit decision — simpler, more reliable)
 - Correlated tolerances between DoF or between edges (explicitly excluded by design, Section 1.2 — do not add without a full re-discussion, as it changes the statistical independence assumptions throughout the sampling and post-processing layers)
 - Parallel/closed-loop kinematic chains (explicitly excluded by design, Section 1.2)
@@ -1742,7 +1734,7 @@ These were explicit decisions made during project scoping and should be treated 
 | Rotation tolerance model | Small-angle approximation throughout — no large-angle support |
 | DoF/edge correlation | None — all 6 DoF per edge, and all edges, treated as statistically independent |
 | FK chain topology | Strictly serial / open / DAG with max one incoming edge per Frame — no closed loops, no parallel mechanisms |
-| Inverse allocation objective (v1) | Equal allocation across free/unlocked edges only |
+| Inverse allocation objective | `LoosestAllocation` — log-sum NLP, per-DoF maximization. `EqualAllocation` and `RSSAllocation` removed 2026-06-28. |
 | Rotation bounding shape (v1) | **Cone** (`max_angle` + `mean_axis`) is the confirmed lead representation, locked 2026-06-23. Per-axis box still implemented as a secondary/expandable cross-check (Section 6.9), not displayed with equal prominence. |
 | Bounding shape visualization | 2D projections (not a true rotatable 3D viewer) |
 | GUI framework | PySide6, desktop, local-only, no server/browser split |
@@ -1839,5 +1831,6 @@ Because this tool produces engineering decisions about physical hardware toleran
 | 2026-06-28 | Claude (D-1 + D-2 planning) | Planned Milestone D on feature branch `feature/d1-d2-viewer-edge-edit`. **D-1 `gui/frame_viewer/`:** `FrameViewerWindow(QWidget, Qt.Window)` opened via `View → 3D Frame Viewer` (Ctrl+3); two modes: *Frames* (pyqtgraph `GLViewWidget` with per-frame coordinate triads via `GLLinePlotItem` in RGB = XYZ, grey edge-connection lines) and *Point Cloud* (`GLScatterPlotItem` from `trial_data.frames[frame][:, :3, 3]`, viridis depth colormap); Section 5.3-compliant world-transform helper `_compute_world_transforms(project)` chains 4×4 numpy matrices from `HTMEdgeModel.nominal` only (no `FrameGraph` or core objects); lazy window stored in `MainWindow._frame_viewer`; 4 unit tests for the helper function (no headless OpenGL rendering tests). New dependency: `pyqtgraph` added to `requirements.txt`. **D-2 `gui/graph_editor/edit_edge_dialog.py`:** `EditEdgeDialog(QDialog)` pre-populated via `HTMEntryWidget.set_htm_input_model(edge.nominal)` (method already existed at line 91); parent/child shown as read-only label; name + nominal HTM editable; duplicate-name check excludes the original name; triggered by double-click on an edge row in `FrameEdgeTree` OR a new "Edit Selected" button; `GraphEditorWidget._on_edit_edge()` replaces `project.edges[idx]` in-place + emits `project_changed`; 3 new tests (pre-population, accept updates project, cancel is a no-op). Spec updated: Sections 6.21, 6.22, 7.5 (Milestone D), 7.6 (formerly 7.5 Deferred), allocation_example.py task marked ✅. |
 | 2026-06-28 | Claude (allocation engine enhancements, feature branch → main) | **IK allocation improvements implemented and merged to main.** (1) **`RSSAllocation`** class added to `sim/allocation.py` — statistical RSS formula (`s = min_k { B_k / sqrt(Σ J[k,col]²) }`), sqrt(N) times less conservative than `EqualAllocation` for N independent contributors; becomes the default objective in the GUI. (2) **Binary-search angular refinement** (`_bisect_angular`): after the fixed-step damping loop finds the first passing iteration, binary-searches between the last failing and first passing allocations to within 0.5% relative tolerance — eliminates the ~10% slack inherent in a fixed `gamma=0.9` step. `_mc_validate()` extracted as a shared helper used by both `validate()` and the bisection. (3) **`AllocationResult`** gains `target_tolerance: ToleranceSpec6 \| None` and `method: str` fields so the results viewer can display what was asked for and which objective was used. (4) **IK results viewer** (`gui/results_viewer/`): achieved-bounds table gains a "Target ±" column (5 columns total: DoF / Target ± / Min / Max / Pass?); status label now appends `[Statistical (RSS)]` or `[Worst-Case]`. (5) **Run panel** (`gui/run_panel/`): Method `QComboBox` added to IK group ("Statistical (RSS)" default / "Worst-Case (Linear Sum)"); **Max iterations `QSpinBox`** added (default 30, range 1–500), wired to `AllocationEngine.allocate(max_iter=...)` — lets users increase iterations when the solver is close but not converging. (6) **`SplitAllocation`** explored but removed — a two-step solver that computed separate bounds for translational vs. angular DoF hit fundamental limitations (single damping loop only tightens angular DoF; combined RSS of ang+trans contributions could exceed budget). Suite: **311 passed** on merge. |
 | 2026-06-28 | Project Owner (request), Claude (implementation) | **`LoosestAllocation` (log-sum NLP) added to `sim/allocation.py`; becomes the new default IK objective in `allocate()` and the GUI.** Motivated by a practical failure of the prior single-scale-factor approach: `EqualAllocation` and `RSSAllocation` both compute a single global `s = min_k(s_k)` and apply it uniformly — so a tight dx target (e.g., 0.001 rad) suppresses rz to the same tight value even when the rz budget is 10 rad and the two DoFs are structurally independent. The correct formulation maximises all free-DoF bounds individually subject to the output-envelope constraints. **Phase 1 — LP (superseded).** The initial implementation used a linear-sum LP (`maximize Σ b_ij`, `|J| @ b ≤ B`). Nominal rotations between frames create Jacobian cross-coupling: when J[4, ry_col] and J[4, rz_col] are both nonzero (ry and rz inputs both contribute to the Ry output), the LP finds a polytope vertex and assigns all budget to one DoF while setting the other to exactly zero. Tested: a single `Ry(π/2)` edge produced b_ry or b_rz = 0.0000000 — unmanufacturable and useless. **Phase 2 — Log-sum NLP (current, locked).** Replace the linear-sum objective with `maximize Σ log(b_ij)`. Because `log(b) → −∞` as `b → 0`, every variable is infinitely penalized from reaching zero, and the optimizer distributes budget proportionally rather than concentrating it at a vertex. Under symmetric coupling (J coefficients equal), the log-sum KKT conditions produce equal shares; under asymmetric coupling, shares are proportional to 1/J[k,col] for the binding constraint's Lagrange multiplier. The problem remains convex NLP (concave objective, linear constraints) so any local optimum is global. Implemented via `scipy.optimize.minimize(method="trust-constr")` with `LinearConstraint` and `Bounds`. **Numerical conditioning:** the original SLSQP warm-start used the global equal-allocation `s` for all DoFs; with a 10 000:1 target ratio this created log-gradients differing by 4 orders of magnitude and destabilised the linesearch. Fix: per-DoF warm start `x0[j] = 0.9 × min_k { B_k / (|J[k,j]| × n_sharing_k) }` (each variable starts near its own binding point); switched to trust-constr (trust-region, not linesearch, handles gradient scale mismatch). **`_bisect_angular` bug fix (same commit):** `lo_scale` was updated each bisection iteration but `lo` (the allocation object) was not, so `ratio = mid_scale / lo_scale` used a stale denominator and `_scale_angular(lo, ratio)` produced wrong absolute values on iterations ≥ 2. Fix: `base_scale = lo_scale` frozen before the loop; `ratio = mid_scale / base_scale` always. **`_build_result` refactored** from `(free_edges, s: float)` to `(free_edges, bounds: np.ndarray)` — required to express per-DoF heterogeneous bounds from the NLP; EqualAllocation/RSSAllocation pass `np.full(6*N, s)`. **GUI:** "Loosest (LP)" added as first entry in the IK Method combo (`gui/run_panel/`). **4 new tests in `tests/test_allocation.py`** including a regression test (`test_loosest_allocation_no_zero_bounds_on_coupled_chain`) that fails with the LP and passes with the log-sum NLP — locked as a permanent regression guard. Suite: **321 passed**. |
+| 2026-06-28 | Project Owner (request), Claude (implementation) | **`LoosestAllocation` made the sole allocation objective; `EqualAllocation`, `RSSAllocation`, and `AllocationObjective` ABC removed from `sim/allocation.py`.** Motivation: both prior single-scale-factor methods collapse the allocation to `s = min_k(s_k)` applied uniformly — a tight constraint on one output DoF (e.g. dx = 0.001) suppresses every other DoF to that same scale even if the other budgets (e.g. rz = 10.0) are structurally independent. `LoosestAllocation` already strictly dominates both in every case, so the other implementations were dead code with no valid use. **Changes:** `sim/allocation.py` — `ABC`/`abstractmethod` import removed; `AllocationObjective`, `EqualAllocation`, `RSSAllocation` classes deleted; `AllocationEngine.solve`, `allocate`, `solve_multi`, `allocate_multi` no longer accept an `objective` parameter; `_run_nlp` called directly; `method` field hardcoded to `"LoosestAllocation"`. **GUI run panel** — Method `QComboBox` removed (was "Loosest / Statistical RSS / Worst-Case"); `_RunWorker` no longer holds an `objective` field. **GUI results viewer** — method label hardcoded to `"Loosest (LP)"`. **Tests** — `EqualAllocation` import removed; `test_loosest_allocation_beats_equal_on_mixed_target` rewritten as `test_solve_fills_independent_dof_budgets` (asserts LP fills each independent DoF budget to its own limit without needing an EqualAllocation comparison); all `objective=LoosestAllocation()` kwargs stripped. Suite: **239 passed** (non-GUI). |
 | 2026-06-28 | Project Owner (request), Claude (implementation) | **Multi-pair IK allocation: `AllocationEngine.solve_multi` / `allocate_multi`.** Extends the IK engine from a single point-pair constraint to simultaneous multiple constraints — e.g., mirror A ↔ B AND mirror A ↔ C — so that tolerance bounds for all edges are optimised jointly rather than independently. **Core algorithm:** for P pairs, build one padded Jacobian per pair (`J_full_p ∈ ℝ^{6 × 6N}` with zero columns for edges not on that pair's path), stack all active (pair, DoF) constraint rows into `A ∈ ℝ^{C × n_free}`, then pass to `LoosestAllocation._run_nlp(A, b)` — the same log-sum NLP that powers single-pair allocation, now with C rows. Shared edges appear in multiple constraint rows, so the optimizer automatically finds the tightest globally-consistent bound without any special handling. **`_run_nlp` extraction:** the NLP core was extracted from `solve()` into a new `LoosestAllocation._run_nlp(A, b)` method shared by both `solve()` and `solve_multi()`. **Multi-pair damping loop (`allocate_multi`):** "failed" = any pair fails MC validation; `gamma` applied uniformly to all free angular bounds; bisection (`_bisect_angular_multi`) validates all pairs simultaneously. **`AllocationResult` additions:** `per_pair_validation: list[tuple[str, str, ValidationReport]] | None` and `per_pair_targets: list[tuple[str, str, ToleranceSpec6]] | None`. **GUI — run panel:** single frame-pair UI replaced by a dynamic `_ConstraintRowWidget` list with "Add Constraint" / "✕" buttons; worker calls `allocate_multi()`. **GUI — results viewer:** per-pair `QGroupBox` sections with pass/fail color in title, and a `DoF | Target ± | Min | Max | Pass?` table per pair so users can directly self-verify achieved vs. requested. **5 new tests** (16 total in `tests/test_allocation.py`): shared-edge correctness, independent-pair isolation, result structure, MC validation with margin, lever-arm multi-pair convergence. Suite: **239 passed** (non-GUI tests). |
 

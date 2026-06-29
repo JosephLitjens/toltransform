@@ -60,8 +60,8 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** Multi-pair IK allocation — **COMPLETE ✅**. Merged to `main` and pushed.
-- **Last completed task:** Multi-pair IK allocation — `allocate_multi` / `solve_multi`, per-pair results display, 5 new tests, docs updated. Suite: **239 passed** (non-GUI tests; 302 passed including GUI tests if PySide6 available).
+- **Current milestone:** EqualAllocation/RSSAllocation removal — **COMPLETE ✅**. Merged to `main` and pushed.
+- **Last completed task:** Removed `EqualAllocation`, `RSSAllocation`, and `AllocationObjective` ABC from `sim/allocation.py`; `LoosestAllocation` is now the sole allocation objective with no `objective` parameter on any public method. GUI Method combo removed. Docs fully updated. Suite: **239 passed** (non-GUI).
 - **Next task:** None — all planned milestones complete. See `docs/design_spec.md` Section 7.6 for deferred/future ideas.
 
 **✅ Multi-pair IK allocation complete (merged to main 2026-06-28):**
@@ -73,25 +73,28 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 - GUI results viewer: per-pair `QGroupBox` with pass/fail title color and `DoF | Target ± | Min | Max | Pass?` table per pair.
 - 5 new tests (16 total in `tests/test_allocation.py`): shared-edge correctness (key correctness test), independent-pair isolation, result structure, MC validation with margin, lever-arm multi-pair convergence.
 
+**✅ EqualAllocation/RSSAllocation removed (2026-06-28):**
+- `AllocationObjective` ABC, `EqualAllocation`, and `RSSAllocation` deleted from `sim/allocation.py`. `LoosestAllocation` is now the sole objective, called directly — no interface indirection, no `objective` parameter on `solve` / `allocate` / `solve_multi` / `allocate_multi`.
+- GUI Method combo removed from run panel; method label hardcoded to "Loosest (LP)" in results viewer.
+- `test_loosest_allocation_beats_equal_on_mixed_target` rewritten as `test_solve_fills_independent_dof_budgets` (no longer needs EqualAllocation to compare against).
+
 **✅ LoosestAllocation complete (merged to main 2026-06-28):**
-- `LoosestAllocation(AllocationObjective)` added to `sim/allocation.py` — log-sum NLP (`maximize Σ log(b_ij)`) with linear worst-case constraints; now the default in `allocate()` and the GUI.
+- `LoosestAllocation` in `sim/allocation.py` — log-sum NLP (`maximize Σ log(b_ij)`) with linear worst-case constraints; the sole allocation objective.
 - **Why log-sum, not LP:** the linear-sum LP (`maximize Σ b_ij`) finds a polytope vertex and assigns zero bounds to DoFs that compete in the same Jacobian row — unmanufacturable. The log-sum forces every DoF positive via `log(0) = −∞` penalty.
 - `_build_result` refactored from scalar to `np.ndarray` bounds vector — required for per-DoF heterogeneous bounds.
 - `_bisect_angular` bug fixed: `ratio` was computed against an updated `lo_scale` rather than the original base, producing wrong absolute bounds on bisection iterations ≥ 2.
-- 4 new tests including `test_loosest_allocation_no_zero_bounds_on_coupled_chain` — permanent regression guard against LP degeneracy with cross-coupled Jacobians (e.g., `Ry(π/2)` nominal).
-- GUI run panel: "Loosest (LP)" added as first/default entry in the IK Method combo.
+- 4 tests including `test_loosest_allocation_no_zero_bounds_on_coupled_chain` — permanent regression guard against LP degeneracy with cross-coupled Jacobians (e.g., `Ry(π/2)` nominal).
 
 **✅ D-2 complete:** `gui/graph_editor/edit_edge_dialog.py` — `EditEdgeDialog(QDialog)` pre-populated via `HTMEntryWidget.set_htm_input_model(edge.nominal)`; parent/child shown as read-only labels; duplicate-name check excludes original name; triggered by double-click on edge row OR "Edit Selected" button in `GraphEditorWidget`; replaces `project.edges[idx]` in-place + emits `project_changed`. 3 new tests.
 
 **✅ D-1 complete:** `gui/frame_viewer/frame_viewer_window.py` — `FrameViewerWindow(QWidget, Qt.Window)` with pyqtgraph `GLViewWidget`; two modes: Frames (per-frame RGB coordinate triads via `GLLinePlotItem`) and Point Cloud (`GLScatterPlotItem` from MC trial data, viridis depth colormap). `_compute_world_transforms(project)` is Section 5.3-compliant (schema types + numpy only, no core objects). Opened via `View → 3D Frame Viewer` (Ctrl+3); live-updates on graph changes and after each run. 4 unit tests (no headless OpenGL rendering tests).
 
 **✅ IK allocation enhancements complete (merged to main 2026-06-28):**
-- `RSSAllocation` class added to `sim/allocation.py` — statistical RSS, sqrt(N) less conservative than `EqualAllocation`.
 - `_bisect_angular()` binary-search refinement — recovers ~10% slack from fixed gamma=0.9 step after damping loop converges.
 - `AllocationResult` gains `target_tolerance` and `method` fields.
-- Run panel: Method combo (Loosest LP / Statistical RSS / Worst-Case) + Max iterations spinbox (default 30, range 1–500).
+- Run panel: Max iterations spinbox (default 30, range 1–500).
 - Results viewer: Target ± column in achieved table; method label in convergence status.
-- SplitAllocation explored and removed (damping loop can only tighten angular DoF; combined RSS of ang+trans could still exceed budget).
+- `RSSAllocation` was added in this milestone then removed on 2026-06-28 (see above); `SplitAllocation` also explored and removed.
 
 **✅ C-7 complete:** `gui/main_window.py` — `QSettings("TolTransform", "TolTransform")` saves/restores window geometry, dock layout, and Recent Files list (capped at 5) between sessions. `closeEvent()` saves settings before accepting; `_restore_settings()` called after `_setup_ui()`. Recent Files submenu under `File > Open Recent` with per-entry `_open_recent()` (handles missing file gracefully), `_add_recent()` (prepend+dedup+cap), `_remove_recent()`, `_clear_recent_files()`. `_save_project_as()` also calls `_add_recent()`.
 
@@ -107,11 +110,11 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 **✅ C-1 complete (commit `e8d36b2`):** `gui/main_window.py` + `gui/graph_editor/` (5 files: `__init__.py`, `htm_entry_widget.py`, `frame_edge_tree.py`, `add_frame_dialog.py`, `add_edge_dialog.py`, `graph_editor_widget.py`). Multi-format HTM entry with live validation, frame/edge tree with root/junction labels, Add Frame/Edge dialogs, delete with referential guard. MainWindow hosts all panels as dock widgets with File > New/Open/Save/Save As menu. 19 tests in `test_gui_graph_editor.py`. Suite: **249 passed**.
 
-**✅ B2-3 complete (commit `0c9bd9d`):** `tests/test_allocation.py` — 7 real tests replacing the `@pytest.mark.skip` placeholder. Lever-arm geometry: `base→pivot` (identity nominal, rz free) → `pivot→arm` (Tx(1m) locked) → `arm→exit` (Ry(π/2) locked). The downstream Ry(π/2) node exposes the linear/MC discrepancy: linear Jacobian at exit_node=pivot (T=I) gives J[:,5]=[0,0,0,0,0,1] (zero dy coupling), but MC sees dy≈L·δrz (first-order, large). EqualAllocation option A locked 2026-06-26 (most restrictive s_k). Convergence at k=7 iterations (0.9^7·0.10=0.0478≤0.05); non-convergence demonstrated with B_dy=0.001 target. **Milestone B-2 fully complete.**
+**✅ B2-3 complete (commit `0c9bd9d`):** `tests/test_allocation.py` — 7 real tests replacing the `@pytest.mark.skip` placeholder. Lever-arm geometry: `base→pivot` (identity nominal, rz free) → `pivot→arm` (Tx(1m) locked) → `arm→exit` (Ry(π/2) locked). The downstream Ry(π/2) node exposes the linear/MC discrepancy: linear Jacobian at exit_node=pivot (T=I) gives J[:,5]=[0,0,0,0,0,1] (zero dy coupling), but MC sees dy≈L·δrz (first-order, large). Convergence at k=7 iterations (0.9^7·0.10=0.0478≤0.05); non-convergence demonstrated with B_dy=0.001 target. **Milestone B-2 fully complete.**
 
 **✅ B2-2 complete (commit `b005eaf`):** `AllocationEngine.allocate()` + `AllocationResult` + `AllocationEngine.validate()` + `_copy_frame_graph_with_tolerances()` + `_damp_angular()`. Angular damping targets only indices (3,4,5); translation bounds unchanged. Locked constants: gamma=0.9, max_iter=10, n_validate=1000. Non-convergence message exactly: "Allocation could not converge to target budget".
 
-**✅ B2-1 complete (commit `22f7a86`):** `AllocationObjective` ABC + `EqualAllocation` + `AllocationEngine.solve()`. EqualAllocation option A (most restrictive): s=min_k(B_k/Σ|J[k,free]|). Design decision documented in Section 11 changelog.
+**✅ B2-1 complete (commit `22f7a86`):** `AllocationEngine.solve()` initial implementation. *(Note: `AllocationObjective` ABC and `EqualAllocation` added here, then superseded and removed on 2026-06-28 by `LoosestAllocation`.)*
 
 **✅ B1-7 complete (commit `04b5b05`):** `examples/pareto_sensitivity_example.py` — standalone example demonstrating all three Section 1.4 use cases: Sensitivity Pinpointing (Pareto breakdown via `compute_tolerance_sensitivities` + `to_ascii_chart()`), Component Selection (upgrade shoulder joint from ±3 mrad to ±1 mrad, compare Pareto rankings), Reporting (save frame report + 2 Pareto charts as PNG via `generate_frame_report` / `generate_sensitivity_report`). No new tests — example scripts only. **Milestone B-1 fully complete.**
 
@@ -157,8 +160,7 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 - `postprocess/stats.py`: `point_pair_envelope_box(trial_data, frame_graph, frame_a, frame_b) -> dict` — A5 / commit `019eb34`. Used by `validate()` to compute achieved envelope.
 - `core/tolerance.py`: `ToleranceSpec`, `ToleranceSpec6` with `.locked` flag — A2 / commit `3ac0eed`. Locked edges excluded from free-variable set in allocation only.
 
-**One open design decision explicitly flagged in Section 6.7 Step 3:**
-When `EqualAllocation.solve()` has multiple active target DoF (e.g., target specifies both dx and rx bounds), the closed-form single scale factor `s` may satisfy one but not all. The spec flags this as: "take the most restrictive/binding DoF, or solve a small least-squares system — **decide and document explicitly once this task is reached**." This is the ONE thing the spec leaves for the B-2 session to decide. Flag the choice to the user before committing to it.
+**Design decision resolved (2026-06-28):** The multi-DoF reconciliation question (most-restrictive s_k vs. least-squares) was moot — `EqualAllocation`/`RSSAllocation` were superseded and removed. `LoosestAllocation` handles all DoFs independently via the NLP; no single scale factor is computed.
 
 **Locked constants (do not change without user discussion):**
 - `gamma = 0.9` per iteration (within the spec-locked `[0.7, 0.95]` range — pick 0.9 as the default)
@@ -167,7 +169,7 @@ When `EqualAllocation.solve()` has multiple active target DoF (e.g., target spec
 - Non-convergence status message: **exactly** `"Allocation could not converge to target budget"`
 - `AllocationResult` must preserve **both** `baseline_linear_allocation` and `corrected_allocation` — never overwrite one with the other
 
-**B-2 task order (per Section 7.3):**
-1. B2-1: `AllocationObjective` interface + `EqualAllocation` + `AllocationEngine.solve()` — closed-form linear step only
-2. B2-2: `AllocationEngine.allocate()` + `AllocationResult` + `validate()` — damping loop and MC validation pass
-3. B2-3: Real tests in `tests/test_allocation.py` (7 required tests per Section 6.7 Step 7)
+**B-2 task order (all complete):**
+1. B2-1: `AllocationEngine.solve()` — closed-form linear step *(EqualAllocation later removed)*
+2. B2-2: `AllocationEngine.allocate()` + `AllocationResult` + `validate()` — damping loop and MC validation
+3. B2-3: Real tests in `tests/test_allocation.py` (16 tests as of final state)
