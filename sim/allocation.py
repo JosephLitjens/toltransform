@@ -104,9 +104,8 @@ class LoosestAllocation:
     log-sum drives b_{ij} → 0 with an infinite penalty (log(0) = −∞), so every
     free DoF always receives a positive, practically useful bound.
 
-    This is solved via SLSQP (scipy.optimize.minimize).  Warm-started from the
-    EqualAllocation solution, which is always feasible and close to the optimum
-    for symmetric chains.
+    Solved via trust-constr (scipy.optimize.minimize).  Warm-started per-DoF
+    near each variable's own binding point for numerical stability.
 
     DoFs with zero sensitivity to all output DoFs are unconstrained; their
     bounds grow until they hit CAP (1e6), which is effectively infinite for

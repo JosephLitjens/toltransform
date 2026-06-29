@@ -334,7 +334,7 @@ def test_loosest_allocation_lever_arm_converges():
 
     LP allocation is still first-order linear and misses dy≈L·δrz coupling,
     so the baseline will fail MC validation. The damping loop must correct it
-    within max_iter, same as with EqualAllocation.
+    within max_iter.
     """
     fg, fa, fb = make_lever_arm_chain(L=1.0)
     target = _lever_target(b_trans=0.05, b_rx=0.20, b_rz=0.10)
