@@ -64,7 +64,10 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 - **Suite: 373 passed, 0 skipped** (full suite including GUI).
 - **Next task:** None — awaiting new feature requests or bug reports.
 
-**Last completed work (merged to main 2026-06-29):**
+**Last completed work (merged to main 2026-06-30):**
+- Deferred cleanup (4 items): `gui/_table_helpers.py` extraction, `tests/helpers.py` + `pytest.ini`, `_ConstraintRowWidget.get_target_model()` Section 5.3 fix, `pytest.skip` antipattern removal. See Section 11 changelog for details.
+
+**Previously completed (merged to main 2026-06-29):**
 - `fix/codebase-cleanup`: Full codebase audit and cleanup pass (14 categories, 7 commits). See Section 11 changelog for details.
 - `feature/apply-allocation-persist-ik-params`: Apply Allocation button + persist IK params.
 - `feature/asymmetric-tolerances`: Asymmetric tolerance bounds + NameError fix + locked-DoF budget fix.
