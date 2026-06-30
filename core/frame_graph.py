@@ -203,11 +203,15 @@ class FrameGraph:
                 return True
         return False
 
+    def assert_connected(self, frame_a: str, frame_b: str) -> None:
+        """Raise DisjointFramesError if frame_a and frame_b are not connected."""
+        if not self.are_connected(frame_a, frame_b):
+            raise DisjointFramesError(_disjoint_message(frame_a, frame_b))
+
     # ── Internal helpers ─────────────────────────────────────────────────────
 
     def _assert_same_component(self, frame_a: str, frame_b: str) -> None:
-        if not self.are_connected(frame_a, frame_b):
-            raise DisjointFramesError(_disjoint_message(frame_a, frame_b))
+        self.assert_connected(frame_a, frame_b)
 
 
 # ── Sensitivity primitives (relocated from sim/allocation.py per Mod 2) ──────

@@ -249,7 +249,7 @@ def relative_pose_trials(
     np.ndarray, shape (N,4,4)
         inv(frame_poses[frame_a][i]) @ frame_poses[frame_b][i] for each trial i.
     """
-    frame_graph._assert_same_component(frame_a, frame_b)
+    frame_graph.assert_connected(frame_a, frame_b)
     T_a_inv = _htm_inverse_batch(trial_data.frame_poses[frame_a])  # (N,4,4)
     T_b = trial_data.frame_poses[frame_b]                          # (N,4,4)
     return np.einsum("nij,njk->nik", T_a_inv, T_b)                # (N,4,4)
