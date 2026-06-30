@@ -1,0 +1,56 @@
+name: Build Standalone App
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_name: TolTransform-macOS
+            artifact_path: dist/TolTransform.app
+          - os: windows-latest
+            artifact_name: TolTransform-Windows
+            artifact_path: dist/TolTransform
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Build with PyInstaller
+        run: pyinstaller toltransform.spec
+
+      - name: Zip artifact (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          zip -r ../${{ matrix.artifact_name }}.zip TolTransform.app
+
+      - name: Zip artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\TolTransform -DestinationPath ${{ matrix.artifact_name }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.zip
+          retention-days: 30
