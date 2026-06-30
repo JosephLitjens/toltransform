@@ -17,45 +17,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from conftest import DEFAULT_ATOL, SMALL_ANGLE_ATOL, make_htm, make_tol, make_zero_tol
 from core.frame_graph import FrameGraph
-from core.tolerance import ToleranceSpec, ToleranceSpec6
-from core.transforms import HTM
+from helpers import _FixedToleranceSpec6
 from postprocess.stats import frame_envelope_box
 from sim.monte_carlo_fk import MonteCarloFKEngine
-
-# ── Local constants and helpers (mirrors conftest.py -- kept here so this file
-#    is also self-contained for readers who open it without conftest context) ──
-
-DEFAULT_ATOL = 1e-9
-SMALL_ANGLE_ATOL = 1e-6
-
-
-def make_tol(bound: float):
-    tol = ToleranceSpec("uniform", bound=bound)
-    return ToleranceSpec6(tol, tol, tol, tol, tol, tol)
-
-
-def make_zero_tol():
-    return make_tol(0.0)
-
-
-def make_htm(x: float = 0.0, y: float = 0.0, z: float = 0.0,
-             ez: float = 0.0, ey: float = 0.0, ex: float = 0.0) -> HTM:
-    return HTM.from_xyz_euler([x, y, z], [ez, ey, ex])
-
-
-class _FixedToleranceSpec6:
-    """Returns the same (N,6) delta for every call — for deterministic hand-checks.
-
-    Duck-types ToleranceSpec6.sample() so it can be passed directly as a tolerance
-    to FrameGraph.add_edge without monkeypatching.
-    """
-
-    def __init__(self, delta_1d):
-        self._delta = np.asarray(delta_1d, dtype=float)  # (6,)
-
-    def sample(self, n_trials: int, rng) -> np.ndarray:
-        return np.tile(self._delta, (n_trials, 1))  # (N,6)
 
 
 def _fixed(delta) -> _FixedToleranceSpec6:

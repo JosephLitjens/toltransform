@@ -14,24 +14,11 @@ import pytest
 from core.frame_graph import FrameGraph
 from core.tolerance import ToleranceSpec, ToleranceSpec6, apply_perturbation_batch
 from core.transforms import HTM
+from helpers import _FixedToleranceSpec6
 from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-class _FixedToleranceSpec6:
-    """Returns the same (N,6) delta every call — for deterministic hand-checks.
-
-    Preferred over mocking so tests are robust to incidental RNG implementation
-    changes while still verifying the composition math exactly.
-    """
-
-    def __init__(self, delta_1d):
-        self._delta = np.asarray(delta_1d, dtype=float)  # (6,)
-
-    def sample(self, n_trials: int, rng) -> np.ndarray:
-        return np.tile(self._delta, (n_trials, 1))  # (N,6)
-
 
 def _zero_tol() -> ToleranceSpec6:
     z = ToleranceSpec("uniform", bound=0.0)

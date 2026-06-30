@@ -16,28 +16,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from gui.main_window import MainWindow, _empty_project
+from helpers import _tol6
 from persistence.schema import (
     FrameModel,
     HTMEdgeModel,
     HTMInputXyzEuler,
     ProjectModel,
     SimSettingsModel,
-    ToleranceSpec6Model,
-    ToleranceSpecModel,
     project_model_to_frame_graph,
 )
 from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _uniform_spec(bound: float = 0.001) -> ToleranceSpecModel:
-    return ToleranceSpecModel(distribution="uniform", bound=bound)
-
-
-def _tol6(bound: float = 0.001) -> ToleranceSpec6Model:
-    s = _uniform_spec(bound)
-    return ToleranceSpec6Model(dx=s, dy=s, dz=s, rx=s, ry=s, rz=s)
 
 
 def _make_project_with_edge() -> ProjectModel:

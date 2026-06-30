@@ -155,12 +155,11 @@ class _ConstraintRowWidget(QWidget):
     def get_frame_pair(self) -> tuple[str, str]:
         return self._frame_a_combo.currentText(), self._frame_b_combo.currentText()
 
-    def get_target(self) -> ToleranceSpec6:
-        specs = [
-            ToleranceSpec(distribution="uniform", bound=spin.value())
-            for spin in self._spins
-        ]
-        return ToleranceSpec6(*specs)
+    def get_target_model(self) -> ToleranceSpec6Model:
+        return ToleranceSpec6Model(**{
+            dof: ToleranceSpecModel(distribution="uniform", bound=spin.value())
+            for dof, spin in zip(_DOF_NAMES, self._spins)
+        })
 
 
 # ── Background worker ─────────────────────────────────────────────────────────
@@ -443,17 +442,8 @@ class RunPanelWidget(QWidget):
             frame_a, frame_b = row.get_frame_pair()
             if not frame_a or not frame_b:
                 continue
-            tol6 = row.get_target()
-            target_model = ToleranceSpec6Model(
-                dx=ToleranceSpecModel(distribution="uniform", bound=tol6.dx.bound),
-                dy=ToleranceSpecModel(distribution="uniform", bound=tol6.dy.bound),
-                dz=ToleranceSpecModel(distribution="uniform", bound=tol6.dz.bound),
-                rx=ToleranceSpecModel(distribution="uniform", bound=tol6.rx.bound),
-                ry=ToleranceSpecModel(distribution="uniform", bound=tol6.ry.bound),
-                rz=ToleranceSpecModel(distribution="uniform", bound=tol6.rz.bound),
-            )
             constraints.append(
-                IKConstraintModel(frame_a=frame_a, frame_b=frame_b, target=target_model)
+                IKConstraintModel(frame_a=frame_a, frame_b=frame_b, target=row.get_target_model())
             )
         self._project.sim_settings.ik_constraints = constraints
 
@@ -471,9 +461,9 @@ class RunPanelWidget(QWidget):
             self._status_label.setStyleSheet("")
         self._status_label.setText(text)
 
-    def _collect_ik_targets(self) -> list[tuple[str, str, ToleranceSpec6]] | None:
+    def _collect_ik_targets(self) -> list[tuple[str, str, ToleranceSpec6Model]] | None:
         """Collect and validate all constraint rows. Returns None on error."""
-        targets: list[tuple[str, str, ToleranceSpec6]] = []
+        targets: list[tuple[str, str, ToleranceSpec6Model]] = []
         for i, row in enumerate(self._constraint_rows):
             frame_a, frame_b = row.get_frame_pair()
             if not frame_a or not frame_b:
@@ -484,7 +474,7 @@ class RunPanelWidget(QWidget):
                     f"Error: constraint {i + 1} — Frame A and Frame B must differ", error=True
                 )
                 return None
-            targets.append((frame_a, frame_b, row.get_target()))
+            targets.append((frame_a, frame_b, row.get_target_model()))
         return targets
 
     # ── Signal handlers ────────────────────────────────────────────────────────
@@ -533,9 +523,13 @@ class RunPanelWidget(QWidget):
         max_iter = 30
 
         if mode == "ik_allocation":
-            ik_targets = self._collect_ik_targets()
-            if ik_targets is None:
+            ik_target_models = self._collect_ik_targets()
+            if ik_target_models is None:
                 return
+            ik_targets = [
+                (fa, fb, ToleranceSpec6(*(ToleranceSpec("uniform", bound=getattr(m, d).bound) for d in _DOF_NAMES)))
+                for fa, fb, m in ik_target_models
+            ]
             max_iter = self._max_iter_spin.value()
 
         try:

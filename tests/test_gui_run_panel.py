@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from gui.run_panel.run_panel_widget import RunPanelWidget
+from helpers import _tol6
 from persistence.schema import (
     FrameModel,
     HTMEdgeModel,
@@ -26,22 +27,11 @@ from sim.allocation import AllocationResult
 from sim.monte_carlo_fk import TrialData
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _uniform_spec(bound: float = 0.001) -> ToleranceSpecModel:
-    return ToleranceSpecModel(distribution="uniform", bound=bound)
-
-
-def _default_tol6(bound: float = 0.001) -> ToleranceSpec6Model:
-    s = _uniform_spec(bound)
-    return ToleranceSpec6Model(dx=s, dy=s, dz=s, rx=s, ry=s, rz=s)
-
-
 def _make_edge(name: str, parent: str, child: str) -> HTMEdgeModel:
     return HTMEdgeModel(
         name=name, parent=parent, child=child,
         nominal=HTMInputXyzEuler(kind="xyz_euler", xyz=[0, 0, 0], euler_angles=[0, 0, 0]),
-        tolerance=_default_tol6(),
+        tolerance=_tol6(),
     )
 
 
@@ -261,7 +251,7 @@ def test_run_panel_loaded_row_targets_match_model(qtbot):
     widget.set_project(project)
 
     row = widget._constraint_rows[0]
-    tol6 = row.get_target()
+    tol6 = row.get_target_model()
     for dof in ("dx", "dy", "dz", "rx", "ry", "rz"):
         assert getattr(tol6, dof).bound == pytest.approx(0.007)
 

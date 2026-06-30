@@ -12,30 +12,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from gui.results_viewer.results_viewer_widget import ResultsViewerWidget
+from helpers import _tol6
 from persistence.schema import (
     FrameModel,
     HTMEdgeModel,
     HTMInputXyzEuler,
     ProjectModel,
     SimSettingsModel,
-    ToleranceSpec6Model,
-    ToleranceSpecModel,
+    project_model_to_frame_graph,
 )
 from sim.allocation import AllocationEngine, AllocationResult
 from sim.monte_carlo_fk import MonteCarloFKEngine, TrialData
 from core.tolerance import ToleranceSpec, ToleranceSpec6
-from persistence.schema import project_model_to_frame_graph
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _uniform_spec(bound: float = 0.001) -> ToleranceSpecModel:
-    return ToleranceSpecModel(distribution="uniform", bound=bound)
-
-
-def _tol6(bound: float = 0.001) -> ToleranceSpec6Model:
-    s = _uniform_spec(bound)
-    return ToleranceSpec6Model(dx=s, dy=s, dz=s, rx=s, ry=s, rz=s)
 
 
 def _make_project() -> ProjectModel:
@@ -238,8 +226,7 @@ def test_results_viewer_apply_writes_bounds_to_project(qtbot, monkeypatch):
     result = _make_alloc_result()
     widget.set_result(result, project)
 
-    if not result.converged:
-        pytest.skip("Allocation did not converge; apply is disabled")
+    assert result.converged, "Allocation did not converge; apply is disabled"
 
     widget._apply_btn.click()
 
@@ -270,8 +257,7 @@ def test_results_viewer_apply_emits_project_changed(qtbot, monkeypatch):
     result = _make_alloc_result()
     widget.set_result(result, _make_project())
 
-    if not result.converged:
-        pytest.skip("Allocation did not converge; apply is disabled")
+    assert result.converged, "Allocation did not converge; apply is disabled"
 
     with qtbot.waitSignal(widget.project_changed, timeout=500):
         widget._apply_btn.click()
@@ -290,8 +276,7 @@ def test_results_viewer_apply_cancel_does_not_modify_project(qtbot, monkeypatch)
     result = _make_alloc_result()
     widget.set_result(result, project)
 
-    if not result.converged:
-        pytest.skip("Allocation did not converge; apply is disabled")
+    assert result.converged, "Allocation did not converge; apply is disabled"
 
     original_bounds = {
         e.name: {dof: getattr(e.tolerance, dof).bound for dof in ("dx", "dy", "dz", "rx", "ry", "rz")}

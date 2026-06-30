@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui._table_helpers import _fill_envelope_table, _ro_item
 from persistence.schema import ProjectModel, SavedAnalysisModel, project_model_to_frame_graph
 from postprocess.stats import DOF_LABELS, point_pair_envelope_box
 from sim.monte_carlo_fk import TrialData
@@ -45,20 +46,6 @@ def _are_connected(project: ProjectModel, frame_a: str, frame_b: str) -> bool:
     for e in project.edges:
         g.add_edge(e.parent, e.child)
     return nx.has_path(g, frame_a, frame_b)
-
-
-def _ro_item(text: str) -> QTableWidgetItem:
-    item = QTableWidgetItem(text)
-    item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-    return item
-
-
-def _fill_envelope_table(table: QTableWidget, envelope: dict) -> None:
-    for row, dof in enumerate(DOF_LABELS):
-        d = envelope.get(dof, {})
-        table.setItem(row, 0, _ro_item(dof))
-        table.setItem(row, 1, _ro_item(f"{d.get('min', 0.0):.6f}"))
-        table.setItem(row, 2, _ro_item(f"{d.get('max', 0.0):.6f}"))
 
 
 class PointPairPanelWidget(QWidget):
