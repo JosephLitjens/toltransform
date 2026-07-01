@@ -17,6 +17,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as SciRotation
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QVector3D
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -388,4 +389,9 @@ class FrameViewerWindow(QWidget):
             self._draw_cloud()
 
     def _reset_camera(self) -> None:
-        self._view.setCameraPosition(distance=1.5, elevation=30, azimuth=45)
+        self._view.setCameraPosition(
+            pos=QVector3D(0, 0, 0),
+            distance=1.5,
+            elevation=30,
+            azimuth=45,
+        )
