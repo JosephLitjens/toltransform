@@ -60,11 +60,19 @@ This repo's remote is **https://github.com/JosephLitjens/toltransform**. Confirm
 
 *(Update this section at the end of each session so the next session — yours or a fresh one — knows exactly where to pick up.)*
 
-- **Current milestone:** Post-milestone. All milestones A → B-1 → B-2 → C → D complete. No planned work outstanding.
+- **Current milestone:** Post-milestone. All milestones A → B-1 → B-2 → C → D → E-1 complete. No planned work outstanding.
 - **Suite: 373 passed, 0 skipped** (full suite including GUI).
+- **Released:** v1.0.0 at https://github.com/JosephLitjens/toltransform/releases/tag/v1.0.0 — standalone Mac (.app) and Windows (.exe) builds available for direct download, no Python required.
 - **Next task:** None — awaiting new feature requests or bug reports.
 
-**Last completed work (merged to main 2026-06-30):**
+**Last completed work (Milestone E-1 — standalone packaging, merged to main 2026-06-30):**
+- PyInstaller packaging for Mac and Windows: `toltransform.spec` (one-folder mode), `packaging/rthook_opengl.py` (sets `QT_OPENGL=desktop` before Qt loads on Windows), `assets/icon.icns` + `assets/icon.ico`.
+- GitHub Actions CI (`.github/workflows/build.yml`): matrix build on `macos-latest` + `windows-latest`, triggered by `v*.*.*` tag pushes; auto-attaches zipped artifacts to the matching GitHub Release via `gh release upload`.
+- Windows HiDPI 3D viewer fix: `_HiDPIGLView` subclass in `gui/frame_viewer/frame_viewer_window.py` overrides `resizeGL` to multiply logical pixels by `devicePixelRatioF()` — root cause was pyqtgraph passing logical pixels to `glViewport` at 125% display scaling.
+- Reset View fix: `_reset_camera()` now passes `pos=QVector3D(0, 0, 0)` to `setCameraPosition` so the pan center is actually reset.
+- See Section 11 changelog for full details.
+
+**Previously completed (merged to main 2026-06-30):**
 - Deferred cleanup (4 items): `gui/_table_helpers.py` extraction, `tests/helpers.py` + `pytest.ini`, `_ConstraintRowWidget.get_target_model()` Section 5.3 fix, `pytest.skip` antipattern removal. See Section 11 changelog for details.
 
 **Previously completed (merged to main 2026-06-29):**
