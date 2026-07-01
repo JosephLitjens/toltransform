@@ -55,7 +55,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['packaging/rthook_opengl.py'],
     excludes=[
         'tkinter',   # not used; saves ~10 MB
         'PyQt5',     # exclude Qt5 if present in env — we use PySide6
