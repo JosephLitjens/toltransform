@@ -29,6 +29,22 @@ from PySide6.QtWidgets import (
 import pyqtgraph.opengl as gl
 from pyqtgraph.opengl import GLViewWidget
 
+
+class _HiDPIGLView(GLViewWidget):
+    """GLViewWidget that correctly handles HiDPI/display-scaled screens.
+
+    pyqtgraph's paintGL() calls self.resizeGL(self.width(), self.height()) using
+    logical pixels. On Windows (or any OS) with display scaling != 100%, the
+    actual OpenGL framebuffer is in physical pixels, so the viewport and
+    projection matrix end up sized for the wrong dimensions, distorting the
+    3D view. This override always passes physical pixel dimensions to resizeGL.
+    On non-scaled displays devicePixelRatioF() == 1.0, so this is a no-op.
+    """
+
+    def resizeGL(self, w: int, h: int) -> None:
+        dpr = self.devicePixelRatioF()
+        super().resizeGL(int(self.width() * dpr), int(self.height() * dpr))
+
 from persistence.schema import (
     HTMInputModel,
     HTMInputMatrix,
@@ -230,7 +246,7 @@ class FrameViewerWindow(QWidget):
         main.addLayout(ctrl)
 
         # 3D viewport
-        self._view = GLViewWidget()
+        self._view = _HiDPIGLView()
         self._view.setCameraPosition(distance=1.5)
         self._view.setBackgroundColor((30, 30, 30))
         main.addWidget(self._view, stretch=1)
