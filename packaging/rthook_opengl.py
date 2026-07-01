@@ -5,4 +5,4 @@ import sys
 import os
 
 if sys.platform == "win32":
-    os.environ["QT_OPENGL"] = "desktop"
+    os.environ["QT_OPENGL"] = "software"

@@ -17,7 +17,7 @@ def main() -> None:
     # The frozen-app runtime hook sets this even earlier (before PySide6 loads),
     # but setting it here too covers the non-frozen development case.
     if sys.platform == "win32":
-        os.environ.setdefault("QT_OPENGL", "desktop")
+        os.environ.setdefault("QT_OPENGL", "software")
 
     # Request a 24-bit depth buffer and a Compatibility profile — pyqtgraph uses
     # OpenGL features (immediate-mode calls, fixed-function pipeline) that are
